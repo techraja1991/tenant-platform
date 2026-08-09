@@ -51,8 +51,8 @@
                         <div class="text-3xl font-bold mt-2" x-text="stats.properties">0</div>
                     </div>
                     <div class="bg-slate-800 p-6 rounded-xl border border-slate-700">
-                        <div class="text-slate-400 text-sm">Total Rooms</div>
-                        <div class="text-3xl font-bold mt-2" x-text="stats.rooms">0</div>
+                        <div class="text-slate-400 text-sm">Occupancy <span class="text-xs">(<span x-text="stats.occupied_rooms + '/' + stats.rooms"></span> rooms)</span></div>
+                        <div class="text-3xl font-bold mt-2" x-text="stats.vacancy_rate + '% vacancy'"></div>
                     </div>
                     <div class="bg-slate-800 p-6 rounded-xl border border-slate-700">
                         <div class="text-slate-400 text-sm">Active Tenants</div>
@@ -60,7 +60,56 @@
                     </div>
                     <div class="bg-slate-800 p-6 rounded-xl border border-slate-700">
                         <div class="text-slate-400 text-sm">Outstanding Due</div>
-                        <div class="text-3xl font-bold mt-2 text-indigo-400" x-text="'₹' + stats.total_outstanding_due">₹0</div>
+                        <div class="text-3xl font-bold mt-2 text-indigo-400" x-text="'₹' + Number(stats.total_outstanding_due).toLocaleString('en-IN')">₹0</div>
+                    </div>
+                </div>
+
+                <!-- Money metrics row -->
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div class="bg-slate-800 p-6 rounded-xl border border-slate-700">
+                        <div class="text-slate-400 text-sm">Monthly Rent Billed</div>
+                        <div class="text-2xl font-bold mt-2" x-text="'₹' + Number(stats.monthly_rent_income).toLocaleString('en-IN')">₹0</div>
+                    </div>
+                    <div class="bg-slate-800 p-6 rounded-xl border border-slate-700">
+                        <div class="text-slate-400 text-sm">Collected (jama)</div>
+                        <div class="text-2xl font-bold mt-2 text-emerald-400" x-text="'₹' + Number(stats.monthly_collections).toLocaleString('en-IN')">₹0</div>
+                    </div>
+                    <div class="bg-slate-800 p-6 rounded-xl border border-slate-700">
+                        <div class="text-slate-400 text-sm">Recovery Rate</div>
+                        <div class="text-2xl font-bold mt-2" x-text="stats.payment_recovery_pct + '%'">0%</div>
+                    </div>
+                </div>
+
+                <!-- Outstanding by property + aging -->
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <div class="bg-slate-800 p-6 rounded-xl border border-slate-700">
+                        <h2 class="text-lg font-bold mb-4">Outstanding by Property <span class="text-xs font-normal text-slate-400">(<span x-text="stats.execution_month"></span>)</span></h2>
+                        <template x-if="stats.outstanding_by_property && stats.outstanding_by_property.length">
+                            <div class="space-y-3">
+                                <template x-for="p in stats.outstanding_by_property" :key="p.apartment_name">
+                                    <div class="flex justify-between items-center">
+                                        <div>
+                                            <div class="font-medium" x-text="p.apartment_name"></div>
+                                            <div class="text-xs text-slate-400" x-text="p.units + ' units'"></div>
+                                        </div>
+                                        <div class="font-bold" x-text="'₹' + Number(p.outstanding).toLocaleString('en-IN')"></div>
+                                    </div>
+                                </template>
+                            </div>
+                        </template>
+                    </div>
+                    <div class="bg-slate-800 p-6 rounded-xl border border-slate-700">
+                        <h2 class="text-lg font-bold mb-4">Outstanding Aging</h2>
+                        <div class="space-y-3">
+                            <div class="flex justify-between items-center">
+                                <div class="text-slate-400">Older months (carried forward)</div>
+                                <div class="font-bold text-amber-400" x-text="'₹' + Number(stats.carried_forward).toLocaleString('en-IN')"></div>
+                            </div>
+                            <div class="flex justify-between items-center">
+                                <div class="text-slate-400">Outstanding older than current month</div>
+                                <div class="font-bold text-rose-400" x-text="'₹' + Number(stats.older_outstanding).toLocaleString('en-IN')"></div>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -77,6 +126,7 @@
                         <button @click="triggerAllocation()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-2.5 rounded-lg font-medium flex items-center gap-2">
                             <i class="fa-solid fa-calculator"></i> Allocate & Compile Monthly Bills
                         </button>
+                        <span x-show="allocationRunning" class="text-emerald-400 font-medium flex items-center gap-2"><i class="fa-solid fa-spinner fa-spin"></i> Allocating...</span>
                     </div>
                 </div>
             </div>
@@ -99,7 +149,10 @@
                                 <th class="p-4">Room Address</th>
                                 <th class="p-4">Phone Number</th>
                                 <th class="p-4">Base Rent</th>
+                                <th class="p-4">Maint.</th>
+                                <th class="p-4">Lease End</th>
                                 <th class="p-4">Status</th>
+                                <th class="p-4"></th>
                             </tr>
                         </thead>
                         <tbody class="divide-y divide-slate-700">
@@ -110,8 +163,100 @@
                                     <td class="p-4" x-text="tenant.display_address"></td>
                                     <td class="p-4" x-text="tenant.phone_number"></td>
                                     <td class="p-4 text-emerald-400 font-medium" x-text="'₹' + tenant.base_rent_applied"></td>
+                                    <td class="p-4 text-slate-400" x-text="'₹' + tenant.maintenance_applied"></td>
+                                    <td class="p-4 text-slate-400" x-text="tenant.lease_end_date || '—'"></td>
                                     <td class="p-4">
                                         <span class="px-2.5 py-1 rounded-full text-xs font-bold" :class="tenant.is_active === 'Y' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'" x-text="tenant.is_active === 'Y' ? 'ACTIVE' : 'INACTIVE'"></span>
+                                    </td>
+                                    <td class="p-4">
+                                        <button @click="openEditTenant(tenant)" class="text-slate-400 hover:text-indigo-400" title="Edit tenant">
+                                            <i class="fa-solid fa-pen"></i>
+                                        </button>
+                                    </td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 2b. PROPERTIES & ROOMS VIEW -->
+            <div x-show="currentTab === 'properties'" class="space-y-6">
+                <div class="flex justify-between items-center">
+                    <h1 class="text-3xl font-bold">Properties & Rooms</h1>
+                    <div class="flex gap-2">
+                        <button @click="openAddPropertyModal()" class="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg font-medium">
+                            + Add Property
+                        </button>
+                        <button @click="openAddRoomModal()" class="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg font-medium">
+                            + Add Room
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Properties -->
+                <div class="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
+                    <h2 class="text-lg font-bold p-4 pb-2">Properties</h2>
+                    <table class="w-full text-left border-collapse text-sm">
+                        <thead class="bg-slate-700/50 text-slate-300">
+                            <tr>
+                                <th class="p-3">ID</th>
+                                <th class="p-3">Property</th>
+                                <th class="p-3">Plot</th>
+                                <th class="p-3">Base Rent</th>
+                                <th class="p-3">Maintenance</th>
+                                <th class="p-3">Deposit</th>
+                                <th class="p-3">Common Util</th>
+                                <th class="p-3">Rooms</th>
+                                <th class="p-3">Occupied</th>
+                                <th class="p-3"></th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-700">
+                            <template x-for="prop in properties" :key="prop.id">
+                                <tr class="hover:bg-slate-700/30">
+                                    <td class="p-3 text-slate-400" x-text="prop.id"></td>
+                                    <td class="p-3 font-semibold" x-text="prop.apartment_name"></td>
+                                    <td class="p-3" x-text="prop.plot_number"></td>
+                                    <td class="p-3" x-text="'₹' + prop.default_base_rent"></td>
+                                    <td class="p-3" x-text="'₹' + prop.default_maintenance_fee"></td>
+                                    <td class="p-3" x-text="'₹' + prop.default_security_deposit"></td>
+                                    <td class="p-3" x-text="'₹' + prop.default_common_utility"></td>
+                                    <td class="p-3" x-text="prop.room_count || 0"></td>
+                                    <td class="p-3" x-text="prop.occupied_rooms || 0"></td>
+                                    <td class="p-3">
+                                        <button @click="openEditProperty(prop)" class="text-slate-400 hover:text-indigo-400" title="Edit property"><i class="fa-solid fa-pen"></i></button>
+                                    </td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Rooms -->
+                <div class="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
+                    <h2 class="text-lg font-bold p-4 pb-2">Rooms</h2>
+                    <table class="w-full text-left border-collapse text-sm">
+                        <thead class="bg-slate-700/50 text-slate-300">
+                            <tr>
+                                <th class="p-3">ID</th>
+                                <th class="p-3">Property</th>
+                                <th class="p-3">Flat No</th>
+                                <th class="p-3">Address</th>
+                                <th class="p-3">Tenant</th>
+                                <th class="p-3"></th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-700">
+                            <template x-for="room in rooms" :key="room.id">
+                                <tr class="hover:bg-slate-700/30">
+                                    <td class="p-3 text-slate-400" x-text="room.id"></td>
+                                    <td class="p-3" x-text="room.apartment_name"></td>
+                                    <td class="p-3 font-semibold" x-text="room.flat_number"></td>
+                                    <td class="p-3" x-text="room.display_address"></td>
+                                    <td class="p-3 text-slate-400" x-text="room.tenant_name || '—'"></td>
+                                    <td class="p-3">
+                                        <button @click="openEditRoom(room)" class="text-slate-400 hover:text-indigo-400" title="Edit room"><i class="fa-solid fa-pen"></i></button>
                                     </td>
                                 </tr>
                             </template>
@@ -122,11 +267,18 @@
 
             <!-- 3. MAINTENANCE EXPENSES VIEW -->
             <div x-show="currentTab === 'expenses'" class="space-y-6">
-                <div class="flex justify-between items-center">
+                <div class="flex justify-between items-center flex-wrap gap-4">
                     <h1 class="text-3xl font-bold">Logged Property Expenses</h1>
-                    <button @click="showAddExpenseModal = true" class="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg font-medium">
-                        + Log New Expense
-                    </button>
+                    <div class="flex gap-2 items-center">
+                        <select x-model="expensesMonth" @change="fetchExpenses()" class="bg-slate-900 border border-slate-700 rounded p-2 text-sm">
+                            <template x-for="m in expenseMonthOptions" :key="m.value">
+                                <option :value="m.value" x-text="m.label"></option>
+                            </template>
+                        </select>
+                        <button @click="openAddExpenseModal()" class="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg font-medium">
+                            + Log New Expense
+                        </button>
+                    </div>
                 </div>
 
                 <div class="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
@@ -140,6 +292,7 @@
                                 <th class="p-4">Unit</th>
                                 <th class="p-4">Amount</th>
                                 <th class="p-4">Execution Month</th>
+                                <th class="p-4"></th>
                             </tr>
                         </thead>
                         <tbody class="divide-y divide-slate-700">
@@ -154,16 +307,52 @@
                                     <td class="p-4 text-slate-400" x-text="exp.room_address || '—'"></td>
                                     <td class="p-4 text-rose-400 font-bold" x-text="'₹' + exp.amount"></td>
                                     <td class="p-4 text-slate-400" x-text="exp.execution_month"></td>
+                                    <td class="p-4">
+                                        <button @click="openEditExpense(exp)" class="text-slate-400 hover:text-indigo-400 mr-2" title="Edit expense"><i class="fa-solid fa-pen"></i></button>
+                                        <button @click="deleteExpense(exp.id)" class="text-rose-400 hover:text-rose-300" title="Delete expense"><i class="fa-solid fa-trash-can"></i></button>
+                                    </td>
                                 </tr>
                             </template>
                         </tbody>
                     </table>
                 </div>
+
+                <!-- Month-over-month expense totals -->
+                <div class="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
+                    <h2 class="text-lg font-bold p-4 pb-2">Month-over-Month Expense Totals</h2>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left border-collapse text-sm">
+                            <thead class="bg-slate-700/50 text-slate-300">
+                                <tr>
+                                    <th class="p-3">Month</th>
+                                    <th class="p-3">Expense Count</th>
+                                    <th class="p-3">Total Amount</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-slate-700">
+                                <template x-for="t in expenseTotals" :key="t.execution_month">
+                                    <tr class="hover:bg-slate-700/30" @click="expensesMonth = t.execution_month; fetchExpenses()" style="cursor:pointer">
+                                        <td class="p-3 font-medium" x-text="formatMonth(t.execution_month)"></td>
+                                        <td class="p-3 text-slate-400" x-text="t.expense_count"></td>
+                                        <td class="p-3 font-bold text-rose-400" x-text="'₹' + Number(t.total_amount).toLocaleString('en-IN')"></td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
             </div>
 
             <!-- 4. MONTHLY LEDGERS VIEW -->
             <div x-show="currentTab === 'ledgers'" class="space-y-6">
-                <h1 class="text-3xl font-bold">Monthly Ledgers</h1>
+                <div class="flex justify-between items-center flex-wrap gap-4">
+                    <h1 class="text-3xl font-bold">Monthly Ledgers</h1>
+                    <select x-model="ledgersMonth" @change="fetchLedgers()" class="bg-slate-900 border border-slate-700 rounded p-2 text-sm">
+                        <template x-for="m in ledgerMonthOptions" :key="m.value">
+                            <option :value="m.value" x-text="m.label"></option>
+                        </template>
+                    </select>
+                </div>
                 <div class="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
                     <table class="w-full text-left border-collapse text-sm">
                         <thead class="bg-slate-700/50 text-slate-300">
@@ -177,7 +366,9 @@
                                 <th class="p-3">Maint.</th>
                                 <th class="p-3">Misc</th>
                                 <th class="p-3 font-bold text-indigo-400">Total Due</th>
+                                <th class="p-3 text-emerald-400">Paid</th>
                                 <th class="p-3">Status</th>
+                                <th class="p-3"></th>
                             </tr>
                         </thead>
                         <tbody class="divide-y divide-slate-700">
@@ -192,8 +383,16 @@
                                     <td class="p-3" x-text="'₹' + ledger.maintenance_applied"></td>
                                     <td class="p-3" x-text="'₹' + ledger.common_misc_expenses"></td>
                                     <td class="p-3 font-bold text-emerald-400 text-base" x-text="'₹' + ledger.new_baki"></td>
+                                    <td class="p-3 text-indigo-400 font-medium" x-text="'₹' + ledger.jama"></td>
                                     <td class="p-3">
-                                        <span class="px-2 py-0.5 rounded text-xs font-bold bg-amber-500/20 text-amber-400" x-text="ledger.payment_status"></span>
+                                        <span class="px-2 py-0.5 rounded text-xs font-bold"
+                                              :class="ledger.payment_status === 'Paid' ? 'bg-emerald-500/20 text-emerald-400' : (ledger.payment_status === 'Partial' ? 'bg-amber-500/20 text-amber-400' : 'bg-rose-500/20 text-rose-400')"
+                                              x-text="ledger.payment_status"></span>
+                                    </td>
+                                    <td class="p-3">
+                                        <button @click="openEditLedger(ledger)" class="text-slate-400 hover:text-indigo-400" title="Edit ledger">
+                                            <i class="fa-solid fa-pen"></i>
+                                        </button>
                                     </td>
                                 </tr>
                             </template>
@@ -247,6 +446,7 @@
                                     <td class="p-3 font-bold text-emerald-400" x-text="'₹' + pay.amount"></td>
                                     <td class="p-3 text-slate-400" x-text="pay.note || '—'"></td>
                                     <td class="p-3">
+                                        <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-500/20 text-indigo-400 mr-1" x-show="pay.split_count > 1" x-text="'split ×' + pay.split_count"></span>
                                         <button @click="deletePayment(pay.id)" class="text-rose-400 hover:text-rose-300" title="Delete payment">
                                             <i class="fa-solid fa-trash-can"></i>
                                         </button>
@@ -288,11 +488,12 @@
         </main>
     </div>
 
-    <!-- ADD TENANT MODAL -->    <div x-show="showAddTenantModal" class="fixed inset-0 bg-black/70 flex items-center justify-center p-4">
+    <!-- ADD TENANT MODAL -->
+    <div x-show="showAddTenantModal" class="fixed inset-0 bg-black/70 flex items-center justify-center p-4">
         <div class="bg-slate-800 rounded-xl p-6 border border-slate-700 max-w-md w-full space-y-4">
             <h2 class="text-xl font-bold">Add New Tenant</h2>
             <div>
-                <label class="text-sm text-slate-400">Room ID</label>
+                <label class="text-sm text-slate-400">Room</label>
                 <select x-model="newTenant.room_id" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
                     <template x-for="room in rooms" :key="room.id">
                         <option :value="room.id" x-text="room.display_address"></option>
@@ -307,9 +508,25 @@
                 <label class="text-sm text-slate-400">Phone Number (WhatsApp)</label>
                 <input type="text" x-model="newTenant.phone_number" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="9876543210">
             </div>
-            <div>
-                <label class="text-sm text-slate-400">Applied Rent (₹)</label>
-                <input type="number" x-model="newTenant.base_rent_applied" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="3300">
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="text-sm text-slate-400">Applied Rent (₹)</label>
+                    <input type="number" x-model="newTenant.base_rent_applied" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="3300">
+                </div>
+                <div>
+                    <label class="text-sm text-slate-400">Maintenance (₹)</label>
+                    <input type="number" x-model="newTenant.maintenance_applied" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="0">
+                </div>
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="text-sm text-slate-400">Security Deposit (₹)</label>
+                    <input type="number" x-model="newTenant.security_deposit_applied" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="5000">
+                </div>
+                <div>
+                    <label class="text-sm text-slate-400">Lease Start Date</label>
+                    <input type="date" x-model="newTenant.lease_start_date" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                </div>
             </div>
             <div class="flex justify-end gap-2 mt-4">
                 <button @click="showAddTenantModal = false" class="px-4 py-2 bg-slate-700 rounded hover:bg-slate-600">Cancel</button>
@@ -318,10 +535,207 @@
         </div>
     </div>
 
-    <!-- ADD EXPENSE MODAL -->
+    <!-- EDIT TENANT MODAL -->
+    <div x-show="showEditTenantModal" class="fixed inset-0 bg-black/70 flex items-center justify-center p-4">
+        <div class="bg-slate-800 rounded-xl p-6 border border-slate-700 max-w-md w-full space-y-4">
+            <h2 class="text-xl font-bold">Edit Tenant</h2>
+            <div>
+                <label class="text-sm text-slate-400">Room</label>
+                <select x-model="editTenant.room_id" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                    <template x-for="room in rooms" :key="room.id">
+                        <option :value="room.id" x-text="room.display_address"></option>
+                    </template>
+                </select>
+            </div>
+            <div>
+                <label class="text-sm text-slate-400">Tenant Full Name</label>
+                <input type="text" x-model="editTenant.tenant_name" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+            </div>
+            <div>
+                <label class="text-sm text-slate-400">Phone Number (WhatsApp)</label>
+                <input type="text" x-model="editTenant.phone_number" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="text-sm text-slate-400">Applied Rent (₹)</label>
+                    <input type="number" x-model="editTenant.base_rent_applied" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                </div>
+                <div>
+                    <label class="text-sm text-slate-400">Maintenance (₹)</label>
+                    <input type="number" x-model="editTenant.maintenance_applied" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                </div>
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="text-sm text-slate-400">Security Deposit (₹)</label>
+                    <input type="number" x-model="editTenant.security_deposit_applied" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                </div>
+                <div>
+                    <label class="text-sm text-slate-400">Status</label>
+                    <select x-model="editTenant.is_active" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                        <option value="Y">Active</option>
+                        <option value="N">Inactive</option>
+                    </select>
+                </div>
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="text-sm text-slate-400">Lease Start</label>
+                    <input type="date" x-model="editTenant.lease_start_date" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                </div>
+                <div>
+                    <label class="text-sm text-slate-400">Lease End</label>
+                    <input type="date" x-model="editTenant.lease_end_date" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                </div>
+            </div>
+            <p class="text-sm text-rose-400" x-show="tenantEditError" x-text="tenantEditError"></p>
+            <div class="flex justify-end gap-2 mt-4">
+                <button @click="showEditTenantModal = false" class="px-4 py-2 bg-slate-700 rounded hover:bg-slate-600">Cancel</button>
+                <button @click="submitTenantEdit()" class="px-4 py-2 bg-indigo-600 rounded hover:bg-indigo-500">Save Changes</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ADD PROPERTY MODAL -->
+    <div x-show="showAddPropertyModal" class="fixed inset-0 bg-black/70 flex items-center justify-center p-4">
+        <div class="bg-slate-800 rounded-xl p-6 border border-slate-700 max-w-md w-full space-y-4">
+            <h2 class="text-xl font-bold">Add Property</h2>
+            <div>
+                <label class="text-sm text-slate-400">Apartment Name</label>
+                <input type="text" x-model="newProperty.apartment_name" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="Plot 57 Apartment">
+            </div>
+            <div>
+                <label class="text-sm text-slate-400">Plot Number</label>
+                <input type="text" x-model="newProperty.plot_number" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="T1">
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="text-sm text-slate-400">Base Rent (₹)</label>
+                    <input type="number" x-model="newProperty.default_base_rent" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="3300">
+                </div>
+                <div>
+                    <label class="text-sm text-slate-400">Maintenance (₹)</label>
+                    <input type="number" x-model="newProperty.default_maintenance_fee" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="0">
+                </div>
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="text-sm text-slate-400">Security Deposit (₹)</label>
+                    <input type="number" x-model="newProperty.default_security_deposit" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="5000">
+                </div>
+                <div>
+                    <label class="text-sm text-slate-400">Common Utility (₹)</label>
+                    <input type="number" x-model="newProperty.default_common_utility" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="0">
+                </div>
+            </div>
+            <p class="text-sm text-rose-400" x-show="propertyError" x-text="propertyError"></p>
+            <div class="flex justify-end gap-2 mt-4">
+                <button @click="showAddPropertyModal = false" class="px-4 py-2 bg-slate-700 rounded hover:bg-slate-600">Cancel</button>
+                <button @click="submitProperty()" class="px-4 py-2 bg-indigo-600 rounded hover:bg-indigo-500">Save Property</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- EDIT PROPERTY MODAL -->
+    <div x-show="showEditPropertyModal" class="fixed inset-0 bg-black/70 flex items-center justify-center p-4">
+        <div class="bg-slate-800 rounded-xl p-6 border border-slate-700 max-w-md w-full space-y-4">
+            <h2 class="text-xl font-bold">Edit Property</h2>
+            <div>
+                <label class="text-sm text-slate-400">Apartment Name</label>
+                <input type="text" x-model="editProperty.apartment_name" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+            </div>
+            <div>
+                <label class="text-sm text-slate-400">Plot Number</label>
+                <input type="text" x-model="editProperty.plot_number" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="text-sm text-slate-400">Base Rent (₹)</label>
+                    <input type="number" x-model="editProperty.default_base_rent" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                </div>
+                <div>
+                    <label class="text-sm text-slate-400">Maintenance (₹)</label>
+                    <input type="number" x-model="editProperty.default_maintenance_fee" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                </div>
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="text-sm text-slate-400">Security Deposit (₹)</label>
+                    <input type="number" x-model="editProperty.default_security_deposit" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                </div>
+                <div>
+                    <label class="text-sm text-slate-400">Common Utility (₹)</label>
+                    <input type="number" x-model="editProperty.default_common_utility" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                </div>
+            </div>
+            <p class="text-sm text-rose-400" x-show="propertyError" x-text="propertyError"></p>
+            <div class="flex justify-end gap-2 mt-4">
+                <button @click="showEditPropertyModal = false" class="px-4 py-2 bg-slate-700 rounded hover:bg-slate-600">Cancel</button>
+                <button @click="submitPropertyEdit()" class="px-4 py-2 bg-indigo-600 rounded hover:bg-indigo-500">Save Changes</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ADD ROOM MODAL -->
+    <div x-show="showAddRoomModal" class="fixed inset-0 bg-black/70 flex items-center justify-center p-4">
+        <div class="bg-slate-800 rounded-xl p-6 border border-slate-700 max-w-md w-full space-y-4">
+            <h2 class="text-xl font-bold">Add Room</h2>
+            <div>
+                <label class="text-sm text-slate-400">Property</label>
+                <select x-model="newRoom.master_id" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                    <template x-for="prop in properties" :key="prop.id">
+                        <option :value="prop.id" x-text="prop.apartment_name"></option>
+                    </template>
+                </select>
+            </div>
+            <div>
+                <label class="text-sm text-slate-400">Flat Number</label>
+                <input type="text" x-model="newRoom.flat_number" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="A-102">
+            </div>
+            <div>
+                <label class="text-sm text-slate-400">Display Address</label>
+                <input type="text" x-model="newRoom.display_address" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="Flat A-102, Plot 57">
+            </div>
+            <p class="text-sm text-rose-400" x-show="roomError" x-text="roomError"></p>
+            <div class="flex justify-end gap-2 mt-4">
+                <button @click="showAddRoomModal = false" class="px-4 py-2 bg-slate-700 rounded hover:bg-slate-600">Cancel</button>
+                <button @click="submitRoom()" class="px-4 py-2 bg-indigo-600 rounded hover:bg-indigo-500">Save Room</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- EDIT ROOM MODAL -->
+    <div x-show="showEditRoomModal" class="fixed inset-0 bg-black/70 flex items-center justify-center p-4">
+        <div class="bg-slate-800 rounded-xl p-6 border border-slate-700 max-w-md w-full space-y-4">
+            <h2 class="text-xl font-bold">Edit Room</h2>
+            <div>
+                <label class="text-sm text-slate-400">Property</label>
+                <select x-model="editRoom.master_id" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                    <template x-for="prop in properties" :key="prop.id">
+                        <option :value="prop.id" x-text="prop.apartment_name"></option>
+                    </template>
+                </select>
+            </div>
+            <div>
+                <label class="text-sm text-slate-400">Flat Number</label>
+                <input type="text" x-model="editRoom.flat_number" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+            </div>
+            <div>
+                <label class="text-sm text-slate-400">Display Address</label>
+                <input type="text" x-model="editRoom.display_address" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+            </div>
+            <p class="text-sm text-rose-400" x-show="roomError" x-text="roomError"></p>
+            <div class="flex justify-end gap-2 mt-4">
+                <button @click="showEditRoomModal = false" class="px-4 py-2 bg-slate-700 rounded hover:bg-slate-600">Cancel</button>
+                <button @click="submitRoomEdit()" class="px-4 py-2 bg-indigo-600 rounded hover:bg-indigo-500">Save Changes</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ADD / EDIT EXPENSE MODAL -->
     <div x-show="showAddExpenseModal" class="fixed inset-0 bg-black/70 flex items-center justify-center p-4">
         <div class="bg-slate-800 rounded-xl p-6 border border-slate-700 max-w-md w-full space-y-4">
-            <h2 class="text-xl font-bold">Log Maintenance Expense</h2>
+            <h2 class="text-xl font-bold" x-text="newExpense.id ? 'Edit Expense' : 'Log Maintenance Expense'"></h2>
             <div>
                 <label class="text-sm text-slate-400">Property Complex</label>
                 <select x-model="newExpense.master_id" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
@@ -341,6 +755,7 @@
             <div x-show="newExpense.charge_type === 'UNIT'">
                 <label class="text-sm text-slate-400">Charge To Unit</label>
                 <select x-model="newExpense.room_id" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                    <option :value="null">—</option>
                     <template x-for="room in rooms" :key="room.id">
                         <option :value="room.id" x-text="room.display_address"></option>
                     </template>
@@ -350,42 +765,137 @@
                 <label class="text-sm text-slate-400">Expense Description</label>
                 <input type="text" x-model="newExpense.expense_name" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="Plumbing / Water Pump Repair">
             </div>
-            <div>
-                <label class="text-sm text-slate-400">Amount (₹)</label>
-                <input type="number" x-model="newExpense.amount" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="1500">
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="text-sm text-slate-400">Amount (₹)</label>
+                    <input type="number" x-model="newExpense.amount" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="1500">
+                </div>
+                <div>
+                    <label class="text-sm text-slate-400">Execution Month</label>
+                    <input type="month" x-model="newExpense.execution_month" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                </div>
             </div>
+            <p class="text-sm text-rose-400" x-show="expenseError" x-text="expenseError"></p>
             <div class="flex justify-end gap-2 mt-4">
                 <button @click="showAddExpenseModal = false" class="px-4 py-2 bg-slate-700 rounded hover:bg-slate-600">Cancel</button>
-                <button @click="submitExpense()" class="px-4 py-2 bg-indigo-600 rounded hover:bg-indigo-500">Save Expense</button>
+                <button @click="submitExpense()" class="px-4 py-2 bg-indigo-600 rounded hover:bg-indigo-500" x-text="newExpense.id ? 'Save Changes' : 'Save Expense'"></button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ALLOCATION RESULT MODAL -->
+    <div x-show="showAllocationModal" class="fixed inset-0 bg-black/70 flex items-center justify-center p-4">
+        <div class="bg-slate-800 rounded-xl p-6 border border-slate-700 max-w-lg w-full space-y-4">
+            <h2 class="text-xl font-bold">Bill Allocation Report</h2>
+            <div class="flex gap-4">
+                <div class="flex-1 bg-slate-900 rounded-lg p-4 text-center">
+                    <div class="text-slate-400 text-sm">Total Tenants</div>
+                    <div class="text-2xl font-bold mt-1" x-text="allocationReport.total || 0"></div>
+                </div>
+                <div class="flex-1 bg-slate-900 rounded-lg p-4 text-center">
+                    <div class="text-slate-400 text-sm">Success</div>
+                    <div class="text-2xl font-bold mt-1 text-emerald-400" x-text="allocationReport.success || 0"></div>
+                </div>
+                <div class="flex-1 bg-slate-900 rounded-lg p-4 text-center">
+                    <div class="text-slate-400 text-sm">Failed</div>
+                    <div class="text-2xl font-bold mt-1" :class="allocationFailures.length ? 'text-rose-400' : 'text-slate-300'" x-text="allocationFailures.length"></div>
+                </div>
+            </div>
+            <template x-if="allocationFailures.length">
+                <div class="bg-rose-500/10 border border-rose-500/30 rounded-lg p-3">
+                    <div class="text-rose-400 font-semibold mb-2">Failed tenants</div>
+                    <div class="space-y-1 text-sm">
+                        <template x-for="f in allocationFailures" :key="f.tenant + f.flat">
+                            <div class="flex justify-between gap-2">
+                                <span class="font-medium" x-text="f.tenant + (f.flat ? ' (' + f.flat + ')' : '')"></span>
+                                <span class="text-slate-400 text-xs truncate" x-text="f.reason"></span>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </template>
+            <template x-if="!allocationFailures.length">
+                <div class="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-3 text-emerald-400 text-sm">
+                    All tenants allocated successfully.
+                </div>
+            </template>
+            <div class="flex justify-end gap-2 mt-4">
+                <button @click="showAllocationModal = false" class="px-4 py-2 bg-slate-700 rounded hover:bg-slate-600">Close</button>
+                <button @click="showAllocationModal = false; fetchLedgers(); fetchLedgerMonths(); fetchStats();" class="px-4 py-2 bg-indigo-600 rounded hover:bg-indigo-500">Refresh Views</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- EDIT LEDGER MODAL -->
+    <div x-show="showEditLedgerModal" class="fixed inset-0 bg-black/70 flex items-center justify-center p-4">
+        <div class="bg-slate-800 rounded-xl p-6 border border-slate-700 max-w-md w-full space-y-4">
+            <h2 class="text-xl font-bold">Edit Ledger Entry</h2>
+            <div class="text-sm text-slate-400" x-text="editLedger.tenant_name + ' — ' + editLedger.display_address + ' (' + editLedger.billing_month + ')'"></div>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="text-sm text-slate-400">Total Due (month_total)</label>
+                    <input type="number" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1 opacity-60" x-model="editLedger.month_total" disabled>
+                </div>
+                <div>
+                    <label class="text-sm text-slate-400">New Balance (new_baki)</label>
+                    <input type="number" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1 opacity-60" x-model="editLedger.new_baki" disabled>
+                </div>
+            </div>
+            <div>
+                <label class="text-sm text-slate-400">Amount Paid (jama)</label>
+                <input type="number" step="0.01" x-model="editLedger.jama" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="0.00">
+                <p class="text-xs text-amber-400/80 mt-1" x-show="editLedger.rent_payments > 0">Recorded rent payments: ₹<span x-text="editLedger.rent_payments"></span> — jama will auto-sync to this value.</p>
+            </div>
+            <div>
+                <label class="text-sm text-slate-400">Payment Date</label>
+                <input type="text" x-model="editLedger.jama_date" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="DD-MM-YYYY or leave blank">
+            </div>
+            <div>
+                <label class="text-sm text-slate-400">Payment Status</label>
+                <select x-model="editLedger.payment_status" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                    <option value="">Auto (from payments)</option>
+                    <option value="Paid">Paid</option>
+                    <option value="Partial">Partial</option>
+                    <option value="Unpaid">Unpaid</option>
+                </select>
+            </div>
+            <p class="text-sm text-rose-400" x-show="editLedgerError" x-text="editLedgerError"></p>
+            <div class="flex justify-end gap-2 mt-4">
+                <button @click="showEditLedgerModal = false" class="px-4 py-2 bg-slate-700 rounded hover:bg-slate-600">Cancel</button>
+                <button @click="submitLedgerEdit()" class="px-4 py-2 bg-indigo-600 rounded hover:bg-indigo-500">Save Changes</button>
             </div>
         </div>
     </div>
 
     <!-- ADD PAYMENT MODAL -->
-    <div x-show="showAddPaymentModal" class="fixed inset-0 bg-black/70 flex items-center justify-center p-4">
-        <div class="bg-slate-800 rounded-xl p-6 border border-slate-700 max-w-md w-full space-y-4">
+    <div x-show="showAddPaymentModal" class="fixed inset-0 bg-black/70 flex items-center justify-center p-4">        <div class="bg-slate-800 rounded-xl p-6 border border-slate-700 max-w-md w-full space-y-4">
             <h2 class="text-xl font-bold">Record Payment</h2>
             <div>
                 <label class="text-sm text-slate-400">Tenant</label>
-                <select x-model="newPayment.tenant_id" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                <select x-model="newPayment.tenant_id" @change="onPaymentTenantChange()" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
                     <template x-for="tenant in activeTenants" :key="tenant.id">
                         <option :value="tenant.id" x-text="tenant.tenant_name + ' — ' + (tenant.display_address || '')"></option>
                     </template>
                 </select>
             </div>
+            <div class="flex justify-between items-center bg-slate-900 rounded-lg px-4 py-3 border border-slate-700">
+                <div class="text-sm text-slate-400">Outstanding Due</div>
+                <div class="text-lg font-bold" :class="selectedTenantOutstanding > 0 ? 'text-rose-400' : 'text-emerald-400'">
+                    ₹<span x-text="Number(selectedTenantOutstanding).toLocaleString('en-IN')"></span>
+                </div>
+            </div>
+            <template x-if="selectedTenantOutstanding > 0 && newPayment.payment_type === 'RENT' && !paymentTotal">
+                <p class="text-xs text-amber-400/80 -mt-2">Tip: amount pre-filled with outstanding due.</p>
+            </template>
             <div>
                 <label class="text-sm text-slate-400">Billing Month</label>
-                <input type="month" x-model="newPayment.billing_month" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                <input type="month" x-model="newPayment.billing_month" @change="onPaymentMonthChange()" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
             </div>
             <div>
                 <label class="text-sm text-slate-400">Payment Date</label>
                 <input type="date" x-model="newPayment.payment_date" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
             </div>
             <div class="grid grid-cols-2 gap-4">
-                <div>
-                    <label class="text-sm text-slate-400">Amount (₹)</label>
-                    <input type="number" x-model="newPayment.amount" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="3300">
-                </div>
                 <div>
                     <label class="text-sm text-slate-400">Payment Mode</label>
                     <select x-model="newPayment.payment_mode" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
@@ -396,18 +906,49 @@
                         <option value="CHEQUE">Cheque</option>
                     </select>
                 </div>
+                <div>
+                    <label class="text-sm text-slate-400">Payment Type</label>
+                    <select x-model="newPayment.payment_type" @change="onPaymentTypeChange()" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                        <option value="RENT">Rent</option>
+                        <option value="DEPOSIT">Security Deposit</option>
+                    </select>
+                </div>
             </div>
-            <div>
-                <label class="text-sm text-slate-400">Payment Type</label>
-                <select x-model="newPayment.payment_type" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
-                    <option value="RENT">Rent</option>
-                    <option value="DEPOSIT">Security Deposit</option>
-                </select>
+
+            <!-- Month allocations (supports advance + split across months) -->
+            <div x-show="newPayment.payment_type === 'RENT'">
+                <div class="flex justify-between items-center">
+                    <label class="text-sm text-slate-400">Allocate Across Months</label>
+                    <button @click="addAllocationRow()" type="button" class="text-xs text-indigo-400 hover:text-indigo-300"><i class="fa-solid fa-plus"></i> Add month</button>
+                </div>
+                <div class="space-y-2 mt-1">
+                    <template x-for="(alloc, i) in newPayment.allocations" :key="i">
+                        <div class="flex gap-2 items-center">
+                            <input type="month" x-model="alloc.billing_month" class="flex-1 bg-slate-900 border border-slate-700 rounded p-2 text-sm">
+                            <input type="number" x-model="alloc.amount" @input="paymentUserEdited = true" class="w-32 bg-slate-900 border border-slate-700 rounded p-2 text-sm" placeholder="Amount">
+                            <button @click="removeAllocationRow(i)" type="button" class="text-rose-400 hover:text-rose-300 text-sm" x-show="newPayment.allocations.length > 1"><i class="fa-solid fa-xmark"></i></button>
+                        </div>
+                    </template>
+                </div>
+                <div class="text-right text-sm mt-1">
+                    Total: <span class="font-bold text-emerald-400" x-text="'₹' + paymentTotal"></span>
+                </div>
+            </div>
+            <div x-show="newPayment.payment_type === 'DEPOSIT'">
+                <div>
+                    <label class="text-sm text-slate-400">Billing Month</label>
+                    <input type="month" x-model="newPayment.billing_month" @change="refreshPaymentOutstanding()" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                </div>
+                <div>
+                    <label class="text-sm text-slate-400">Amount (₹)</label>
+                    <input type="number" x-model="newPayment.amount" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="3300">
+                </div>
             </div>
             <div>
                 <label class="text-sm text-slate-400">Note (optional)</label>
                 <input type="text" x-model="newPayment.note" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="e.g. 2 months advance">
             </div>
+            <p class="text-sm text-rose-400" x-show="paymentError" x-text="paymentError"></p>
             <div class="flex justify-end gap-2 mt-4">
                 <button @click="showAddPaymentModal = false" class="px-4 py-2 bg-slate-700 rounded hover:bg-slate-600">Cancel</button>
                 <button @click="submitPayment()" class="px-4 py-2 bg-indigo-600 rounded hover:bg-indigo-500">Save Payment</button>
@@ -428,15 +969,98 @@
                 payments: [],
                 deposits: [],
                 paymentsMonth: new Date().getFullYear() + '-' + String(new Date().getMonth() + 1).padStart(2, '0'),
+                ledgersMonth: new Date().getFullYear() + '-' + String(new Date().getMonth() + 1).padStart(2, '0'),
+                ledgerMonths: [],
+                showEditLedgerModal: false,
+                editLedger: {},
+                editLedgerError: '',
                 showAddTenantModal: false,
+                showEditTenantModal: false,
+                editTenant: {},
+                tenantEditError: '',
                 showAddExpenseModal: false,
                 showAddPaymentModal: false,
-                newTenant: { room_id: 1, tenant_name: '', phone_number: '', base_rent_applied: 3300 },
-                newExpense: { master_id: 1, expense_name: '', amount: 0, charge_type: 'SHARED', room_id: null },
-                newPayment: { tenant_id: 1, billing_month: '', payment_date: '', amount: 0, payment_mode: 'CASH', payment_type: 'RENT', note: '' },
+                showAddPropertyModal: false,
+                showEditPropertyModal: false,
+                showAddRoomModal: false,
+                showEditRoomModal: false,
+                showAllocationModal: false,
+                allocationReport: {},
+                allocationRunning: false,
+                newTenant: { room_id: 1, tenant_name: '', phone_number: '', base_rent_applied: 3300, maintenance_applied: 0, security_deposit_applied: 5000, lease_start_date: '', lease_end_date: '' },
+                newExpense: { id: null, master_id: 1, expense_name: '', amount: 0, charge_type: 'SHARED', room_id: null, execution_month: '' },
+                expenseError: '',
+                newPayment: { tenant_id: 1, billing_month: '', payment_date: '', amount: 0, payment_mode: 'CASH', payment_type: 'RENT', note: '', outstanding: 0, allocations: [{ billing_month: '', amount: 0 }] },
+                paymentUserEdited: false,
+                paymentError: '',
+                newProperty: { apartment_name: '', plot_number: '', default_base_rent: 3300, default_maintenance_fee: 0, default_security_deposit: 5000, default_common_utility: 0 },
+                editProperty: {},
+                propertyError: '',
+                newRoom: { master_id: 1, flat_number: '', display_address: '' },
+                editRoom: {},
+                roomError: '',
+                expensesMonth: new Date().getFullYear() + '-' + String(new Date().getMonth() + 1).padStart(2, '0'),
+                expenseMonths: [],
+                expenseTotals: [],
+                get allocationFailures() {
+                    return (this.allocationReport.failures) || [];
+                },
+                get expenseMonthOptions() {
+                    if (this.expenseMonths && this.expenseMonths.length) {
+                        return this.expenseMonths.map(m => ({
+                            value: m,
+                            label: new Date(m + '-01').toLocaleString('en-US', { month: 'long', year: 'numeric' })
+                        }));
+                    }
+                    return [{ value: this.expensesMonth, label: this.formatMonth(this.expensesMonth) }];
+                },
 
                 get activeTenants() {
                     return this.tenants.filter(t => t.is_active === 'Y');
+                },
+                get selectedTenantOutstanding() {
+                    return Number(this.newPayment.outstanding) || 0;
+                },
+                async refreshPaymentOutstanding() {
+                    const tid = Number(this.newPayment.tenant_id);
+                    const month = this.newPayment.billing_month;
+                    if (!tid || !month) { this.newPayment.outstanding = 0; return; }
+                    try {
+                        const res = await fetch(`/api/tenants/${tid}/outstanding?billing_month=${month}`);
+                        const body = await res.json();
+                        this.newPayment.outstanding = body.outstanding || 0;
+                        if (this.newPayment.payment_type === 'RENT' && Number(body.outstanding) > 0 && !this.paymentUserEdited) {
+                            this.newPayment.allocations = [{ billing_month: month, amount: Number(body.outstanding) }];
+                        }
+                    } catch (e) {
+                        this.newPayment.outstanding = 0;
+                    }
+                },
+                onPaymentTenantChange() {
+                    this.paymentUserEdited = false;
+                    this.refreshPaymentOutstanding();
+                },
+                onPaymentTypeChange() {
+                    if (this.newPayment.payment_type === 'RENT') {
+                        this.paymentUserEdited = false;
+                        this.refreshPaymentOutstanding();
+                    }
+                },
+                onPaymentMonthChange() {
+                    this.paymentUserEdited = false;
+                    if (this.newPayment.payment_type === 'RENT' && this.newPayment.allocations.length === 1) {
+                        this.newPayment.allocations[0].billing_month = this.newPayment.billing_month;
+                    }
+                    this.refreshPaymentOutstanding();
+                },
+                get ledgerMonthOptions() {
+                    if (this.ledgerMonths && this.ledgerMonths.length) {
+                        return this.ledgerMonths.map(m => ({
+                            value: m,
+                            label: new Date(m + '-01').toLocaleString('en-US', { month: 'long', year: 'numeric' })
+                        }));
+                    }
+                    return this.monthOptions;
                 },
                 get monthOptions() {
                     const opts = [];
@@ -450,13 +1074,23 @@
                     return opts;
                 },
 
+                formatMonth(m) {
+                    if (!m) return '';
+                    try {
+                        return new Date(m + '-01').toLocaleString('en-US', { month: 'long', year: 'numeric' });
+                    } catch (e) {
+                        return m;
+                    }
+                },
                 async initData() {
                     this.fetchStats();
                     this.fetchTenants();
                     this.fetchLedgers();
+                    this.fetchLedgerMonths();
                     this.fetchRooms();
                     this.fetchProperties();
                     this.fetchExpenses();
+                    this.fetchExpenseMeta();
                     this.fetchPayments();
                     this.fetchDeposits();
                 },
@@ -469,8 +1103,15 @@
                     this.tenants = await res.json();
                 },
                 async fetchLedgers() {
-                    const res = await fetch('/api/ledgers/current');
+                    const res = await fetch('/api/ledgers?billing_month=' + this.ledgersMonth);
                     this.ledgers = await res.json();
+                },
+                async fetchLedgerMonths() {
+                    const res = await fetch('/api/ledgers/months');
+                    this.ledgerMonths = await res.json();
+                    if (this.ledgerMonths.length && this.ledgerMonths.indexOf(this.ledgersMonth) === -1) {
+                        this.ledgersMonth = this.ledgerMonths[0];
+                    }
                 },
                 async fetchRooms() {
                     const res = await fetch('/api/rooms');
@@ -481,12 +1122,27 @@
                     this.properties = await res.json();
                 },
                 async fetchExpenses() {
-                    const res = await fetch('/api/expenses');
+                    const res = await fetch('/api/expenses?execution_month=' + this.expensesMonth);
                     this.expenses = await res.json();
+                },
+                async fetchExpenseMeta() {
+                    const res = await fetch('/api/expenses/months');
+                    this.expenseMonths = await res.json();
+                    if (this.expenseMonths.length && this.expenseMonths.indexOf(this.expensesMonth) === -1) {
+                        this.expensesMonth = this.expenseMonths[0];
+                    }
+                    const res2 = await fetch('/api/expenses/totals');
+                    this.expenseTotals = await res2.json();
+                    this.fetchExpenses();
                 },
                 async fetchPayments() {
                     const res = await fetch('/api/payments?billing_month=' + this.paymentsMonth);
-                    this.payments = await res.json();
+                    const rows = await res.json();
+                    const batchCounts = {};
+                    rows.forEach(r => {
+                        if (r.batch_id) batchCounts[r.batch_id] = (batchCounts[r.batch_id] || 0) + 1;
+                    });
+                    this.payments = rows.map(r => ({ ...r, split_count: (r.batch_id && batchCounts[r.batch_id]) || 1 }));
                 },
                 async fetchDeposits() {
                     const res = await fetch('/api/deposits');
@@ -494,23 +1150,116 @@
                 },
                 openAddPaymentModal() {
                     const now = new Date();
-                    this.newPayment.billing_month = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0');
+                    const currentMonth = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0');
                     this.newPayment.payment_date = now.toISOString().slice(0, 10);
+                    this.newPayment.billing_month = currentMonth;
+                    this.newPayment.allocations = [{ billing_month: currentMonth, amount: 0 }];
+                    this.newPayment.amount = 0;
+                    this.newPayment.note = '';
+                    this.newPayment.outstanding = 0;
+                    this.newPayment.payment_mode = 'CASH';
+                    this.newPayment.payment_type = 'RENT';
+                    this.paymentError = '';
+                    this.paymentUserEdited = false;
                     if (this.activeTenants.length > 0) {
                         this.newPayment.tenant_id = this.activeTenants[0].id;
                     }
                     this.showAddPaymentModal = true;
+                    this.refreshPaymentOutstanding();
+                },
+                get paymentTotal() {
+                    return this.newPayment.allocations
+                        .reduce((s, a) => s + (Number(a.amount) || 0), 0);
+                },
+                addAllocationRow() {
+                    this.newPayment.allocations.push({ billing_month: '', amount: 0 });
+                },
+                removeAllocationRow(i) {
+                    if (this.newPayment.allocations.length > 1) {
+                        this.newPayment.allocations.splice(i, 1);
+                    }
                 },
                 async submitPayment() {
-                    await fetch('/api/payments', {
+                    const payload = {
+                        tenant_id: Number(this.newPayment.tenant_id),
+                        payment_date: this.newPayment.payment_date,
+                        payment_mode: this.newPayment.payment_mode,
+                        payment_type: this.newPayment.payment_type,
+                        note: this.newPayment.note || null
+                    };
+                    if (this.newPayment.payment_type === 'RENT') {
+                        const allocs = this.newPayment.allocations
+                            .filter(a => a.billing_month && Number(a.amount) > 0)
+                            .map(a => ({ billing_month: a.billing_month, amount: Number(a.amount) }));
+                        if (allocs.length === 0) {
+                            this.paymentError = 'Add at least one month allocation with an amount.';
+                            return;
+                        }
+                        payload.allocations = allocs;
+                    } else {
+                        payload.billing_month = this.newPayment.billing_month;
+                        payload.amount = Number(this.newPayment.amount);
+                        if (!payload.billing_month || !(payload.amount > 0)) {
+                            this.paymentError = 'Enter a billing month and amount.';
+                            return;
+                        }
+                    }
+                    const res = await fetch('/api/payments', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(this.newPayment)
+                        body: JSON.stringify(payload)
                     });
+                    const body = await res.json().catch(() => ({}));
+                    if (!res.ok) {
+                        this.paymentError = body.detail || 'Failed to save payment.';
+                        return;
+                    }
                     this.showAddPaymentModal = false;
+                    this.paymentError = '';
                     this.fetchPayments();
                     this.fetchDeposits();
                     this.fetchLedgers();
+                    this.fetchStats();
+                },
+                async openEditLedger(ledger) {
+                    const res = await fetch('/api/payments?billing_month=' + ledger.billing_month);
+                    const monthPayments = await res.json();
+                    const rentPayments = monthPayments
+                        .filter(p => p.payment_type === 'RENT' && p.tenant_id === ledger.tenant_id)
+                        .reduce((s, p) => s + Number(p.amount || 0), 0);
+                    this.editLedger = {
+                        id: ledger.id,
+                        tenant_id: ledger.tenant_id,
+                        tenant_name: ledger.tenant_name,
+                        display_address: ledger.display_address,
+                        billing_month: ledger.billing_month,
+                        month_total: ledger.month_total,
+                        new_baki: ledger.new_baki,
+                        jama: ledger.jama,
+                        jama_date: ledger.jama_date === '0' ? '' : ledger.jama_date,
+                        payment_status: '',
+                        rent_payments: rentPayments
+                    };
+                    this.editLedgerError = '';
+                    this.showEditLedgerModal = true;
+                },
+                async submitLedgerEdit() {
+                    const payload = { jama: Number(this.editLedger.jama) || 0 };
+                    if (this.editLedger.jama_date) payload.jama_date = this.editLedger.jama_date;
+                    if (this.editLedger.payment_status) payload.payment_status = this.editLedger.payment_status;
+                    const res = await fetch('/api/ledgers/' + this.editLedger.id, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    const body = await res.json().catch(() => ({}));
+                    if (!res.ok) {
+                        this.editLedgerError = body.detail || 'Failed to save changes.';
+                        return;
+                    }
+                    this.showEditLedgerModal = false;
+                    this.fetchLedgers();
+                    this.fetchStats();
                 },
                 async deletePayment(id) {
                     if (!confirm('Delete this payment record?')) return;
@@ -518,6 +1267,7 @@
                     this.fetchPayments();
                     this.fetchDeposits();
                     this.fetchLedgers();
+                    this.fetchStats();
                 },
                 async triggerScraper() {
                     alert('Triggering Torrent Power Scraper...');
@@ -527,29 +1277,234 @@
                     alert('Importing Piped Gas CSV metrics...');
                     await fetch('/api/operations/import-gas-metrics', { method: 'POST' });
                     this.fetchLedgers();
+                    this.fetchLedgerMonths();
                 },
                 async triggerAllocation() {
-                    alert('Allocating tenant bills...');
-                    await fetch('/api/operations/allocate-bills', { method: 'POST' });
-                    this.fetchLedgers();
+                    this.allocationRunning = true;
+                    try {
+                        const res = await fetch('/api/operations/allocate-bills', { method: 'POST' });
+                        const body = await res.json().catch(() => ({}));
+                        this.allocationReport = body.report || { total: 0, success: 0, failures: [] };
+                        this.showAllocationModal = true;
+                        if (!res.ok) {
+                            this.allocationReport = { total: 0, success: 0, failures: [{ tenant: '—', reason: body.detail || 'Allocation failed' }] };
+                            this.showAllocationModal = true;
+                        }
+                    } finally {
+                        this.allocationRunning = false;
+                    }
                 },
                 async submitTenant() {
-                    await fetch('/api/tenants', {
+                    const res = await fetch('/api/tenants', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(this.newTenant)
                     });
+                    const body = await res.json().catch(() => ({}));
+                    if (!res.ok) {
+                        alert(body.detail || 'Failed to save tenant.');
+                        return;
+                    }
                     this.showAddTenantModal = false;
                     this.fetchTenants();
+                    this.fetchRooms();
                 },
-                async submitExpense() {
-                    await fetch('/api/expenses', {
+                openEditTenant(tenant) {
+                    this.editTenant = {
+                        id: tenant.id,
+                        room_id: tenant.room_id,
+                        tenant_name: tenant.tenant_name,
+                        phone_number: tenant.phone_number,
+                        base_rent_applied: tenant.base_rent_applied,
+                        maintenance_applied: tenant.maintenance_applied,
+                        security_deposit_applied: tenant.security_deposit_applied,
+                        is_active: tenant.is_active || 'Y',
+                        lease_start_date: tenant.lease_start_date ? tenant.lease_start_date.slice(0, 10) : '',
+                        lease_end_date: tenant.lease_end_date ? tenant.lease_end_date.slice(0, 10) : ''
+                    };
+                    this.tenantEditError = '';
+                    this.showEditTenantModal = true;
+                },
+                async submitTenantEdit() {
+                    const payload = {
+                        tenant_name: this.editTenant.tenant_name,
+                        room_id: Number(this.editTenant.room_id),
+                        phone_number: this.editTenant.phone_number,
+                        base_rent_applied: Number(this.editTenant.base_rent_applied),
+                        maintenance_applied: Number(this.editTenant.maintenance_applied),
+                        security_deposit_applied: Number(this.editTenant.security_deposit_applied),
+                        is_active: this.editTenant.is_active,
+                        lease_start_date: this.editTenant.lease_start_date || '',
+                        lease_end_date: this.editTenant.lease_end_date || ''
+                    };
+                    const res = await fetch('/api/tenants/' + this.editTenant.id, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    const body = await res.json().catch(() => ({}));
+                    if (!res.ok) {
+                        this.tenantEditError = body.detail || 'Failed to save changes.';
+                        return;
+                    }
+                    this.showEditTenantModal = false;
+                    this.fetchTenants();
+                    this.fetchRooms();
+                    this.fetchStats();
+                },
+                openAddPropertyModal() {
+                    this.newProperty = { apartment_name: '', plot_number: '', default_base_rent: 3300, default_maintenance_fee: 0, default_security_deposit: 5000, default_common_utility: 0 };
+                    this.propertyError = '';
+                    this.showAddPropertyModal = true;
+                },
+                openEditProperty(prop) {
+                    this.editProperty = {
+                        id: prop.id,
+                        apartment_name: prop.apartment_name,
+                        plot_number: prop.plot_number,
+                        default_base_rent: prop.default_base_rent,
+                        default_maintenance_fee: prop.default_maintenance_fee,
+                        default_security_deposit: prop.default_security_deposit,
+                        default_common_utility: prop.default_common_utility
+                    };
+                    this.propertyError = '';
+                    this.showEditPropertyModal = true;
+                },
+                async submitProperty() {
+                    const res = await fetch('/api/properties', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(this.newExpense)
+                        body: JSON.stringify(this.newProperty)
                     });
+                    const body = await res.json().catch(() => ({}));
+                    if (!res.ok) {
+                        this.propertyError = body.detail || 'Failed to save property.';
+                        return;
+                    }
+                    this.showAddPropertyModal = false;
+                    this.fetchProperties();
+                },
+                async submitPropertyEdit() {
+                    const payload = {
+                        apartment_name: this.editProperty.apartment_name,
+                        plot_number: this.editProperty.plot_number,
+                        default_base_rent: Number(this.editProperty.default_base_rent),
+                        default_maintenance_fee: Number(this.editProperty.default_maintenance_fee),
+                        default_security_deposit: Number(this.editProperty.default_security_deposit),
+                        default_common_utility: Number(this.editProperty.default_common_utility)
+                    };
+                    const res = await fetch('/api/properties/' + this.editProperty.id, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    const body = await res.json().catch(() => ({}));
+                    if (!res.ok) {
+                        this.propertyError = body.detail || 'Failed to save changes.';
+                        return;
+                    }
+                    this.showEditPropertyModal = false;
+                    this.fetchProperties();
+                },
+                openAddRoomModal() {
+                    if (this.properties.length) this.newRoom.master_id = this.properties[0].id;
+                    this.newRoom.flat_number = '';
+                    this.newRoom.display_address = '';
+                    this.roomError = '';
+                    this.showAddRoomModal = true;
+                },
+                openEditRoom(room) {
+                    this.editRoom = { id: room.id, master_id: room.master_id, flat_number: room.flat_number, display_address: room.display_address };
+                    this.roomError = '';
+                    this.showEditRoomModal = true;
+                },
+                async submitRoom() {
+                    const res = await fetch('/api/rooms', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(this.newRoom)
+                    });
+                    const body = await res.json().catch(() => ({}));
+                    if (!res.ok) {
+                        this.roomError = body.detail || 'Failed to save room.';
+                        return;
+                    }
+                    this.showAddRoomModal = false;
+                    this.fetchRooms();
+                    this.fetchProperties();
+                },
+                async submitRoomEdit() {
+                    const payload = {
+                        master_id: Number(this.editRoom.master_id),
+                        flat_number: this.editRoom.flat_number,
+                        display_address: this.editRoom.display_address
+                    };
+                    const res = await fetch('/api/rooms/' + this.editRoom.id, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    const body = await res.json().catch(() => ({}));
+                    if (!res.ok) {
+                        this.roomError = body.detail || 'Failed to save changes.';
+                        return;
+                    }
+                    this.showEditRoomModal = false;
+                    this.fetchRooms();
+                },
+                openAddExpenseModal() {
+                    const now = new Date();
+                    this.newExpense = { id: null, master_id: this.properties.length ? this.properties[0].id : 1, expense_name: '', amount: 0, charge_type: 'SHARED', room_id: null, execution_month: now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') };
+                    this.expenseError = '';
+                    this.showAddExpenseModal = true;
+                },
+                openEditExpense(exp) {
+                    this.newExpense = {
+                        id: exp.id,
+                        master_id: exp.master_id,
+                        expense_name: exp.expense_name,
+                        amount: exp.amount,
+                        charge_type: exp.charge_type,
+                        room_id: exp.room_id,
+                        execution_month: exp.execution_month
+                    };
+                    this.expenseError = '';
+                    this.showAddExpenseModal = true;
+                },
+                async deleteExpense(id) {
+                    if (!confirm('Delete this expense record?')) return;
+                    await fetch('/api/expenses/' + id, { method: 'DELETE' });
+                    this.fetchExpenses();
+                    this.fetchExpenseMeta();
+                },
+                async submitExpense() {
+                    const payload = {
+                        master_id: Number(this.newExpense.master_id),
+                        expense_name: this.newExpense.expense_name,
+                        amount: Number(this.newExpense.amount),
+                        charge_type: this.newExpense.charge_type,
+                        execution_month: this.newExpense.execution_month || this.expensesMonth,
+                        room_id: this.newExpense.charge_type === 'UNIT' ? this.newExpense.room_id : null
+                    };
+                    if (!payload.expense_name || !(payload.amount > 0)) {
+                        this.expenseError = 'Enter a description and amount.';
+                        return;
+                    }
+                    const url = this.newExpense.id ? '/api/expenses/' + this.newExpense.id : '/api/expenses';
+                    const method = this.newExpense.id ? 'PUT' : 'POST';
+                    const res = await fetch(url, {
+                        method,
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    const body = await res.json().catch(() => ({}));
+                    if (!res.ok) {
+                        this.expenseError = body.detail || 'Failed to save expense.';
+                        return;
+                    }
                     this.showAddExpenseModal = false;
                     this.fetchExpenses();
+                    this.fetchExpenseMeta();
                 }
             }
         }

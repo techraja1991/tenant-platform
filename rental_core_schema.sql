@@ -2,9 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 2ACnGTjQlgYQGJ2JaiLrgH9tnw5hMq7BdPSgpd5Tg5U0skGMeDPhMdaWz1fKBzS
-
-\restrict VceGqeLo0bwnBMtSXlPeln0emPYF1JhTzfCXGHqADk18h8Ry1N6tChWKNvRqtEg
+\restrict Ha5CfQhpiXh3r1fhCWMsZNN7vz4bIDUlWE2BITL4gLASQ11au7Z0by4H1UnGEQd
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
@@ -342,6 +340,7 @@ CREATE TABLE rental_core.tenant_payments (
     payment_type character varying(20) DEFAULT 'RENT'::character varying NOT NULL,
     note text,
     created_at timestamp without time zone DEFAULT now(),
+    batch_id integer,
     CONSTRAINT tenant_payments_payment_mode_check CHECK (((payment_mode)::text = ANY (ARRAY[('CASH'::character varying)::text, ('UPI'::character varying)::text, ('BANK_TRANSFER'::character varying)::text, ('CARD'::character varying)::text, ('CHEQUE'::character varying)::text]))),
     CONSTRAINT tenant_payments_payment_type_check CHECK (((payment_type)::text = ANY (ARRAY[('RENT'::character varying)::text, ('DEPOSIT'::character varying)::text]))),
     CONSTRAINT tp_amount_positive_check CHECK ((amount > (0)::numeric)),
@@ -843,6 +842,13 @@ CREATE INDEX idx_tenant_ledgers_room_id ON rental_core.tenant_ledgers USING btre
 
 
 --
+-- Name: idx_tenant_payments_batch_id; Type: INDEX; Schema: rental_core; Owner: platform_admin
+--
+
+CREATE INDEX idx_tenant_payments_batch_id ON rental_core.tenant_payments USING btree (batch_id);
+
+
+--
 -- Name: idx_tenant_payments_billing_month; Type: INDEX; Schema: rental_core; Owner: platform_admin
 --
 
@@ -1111,6 +1117,5 @@ ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA rental_core GRANT ALL ON TA
 -- PostgreSQL database dump complete
 --
 
-\unrestrict VceGqeLo0bwnBMtSXlPeln0emPYF1JhTzfCXGHqADk18h8Ry1N6tChWKNvRqtEg
+\unrestrict Ha5CfQhpiXh3r1fhCWMsZNN7vz4bIDUlWE2BITL4gLASQ11au7Z0by4H1UnGEQd
 
-\unrestrict 2ACnGTjQlgYQGJ2JaiLrgH9tnw5hMq7BdPSgpd5Tg5U0skGMeDPhMdaWz1fKBzS

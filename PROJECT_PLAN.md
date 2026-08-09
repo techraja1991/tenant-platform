@@ -45,14 +45,14 @@ Goal: full day-to-day operations from the browser; correct, reconcilable records
 
 | # | Sub-task | Details | Status |
 |---|---|---|---|
-| 1.1 | Ledger month selector | `GET /api/ledgers/{month}` + month dropdown in the Monthly Ledgers tab (currently current-month only) | ⏳ Planned |
-| 1.2 | Ledger editing | Edit `jama`, `jama_date`, `payment_status` per month; validate against `tenant_payments` so payments and ledger never diverge | ⏳ Planned |
-| 1.3 | Payment reconciliation refinements | Support advance payments and splitting one payment across multiple billing months; auto-mark `Paid/Partial/Unpaid` recomputed from payments | ⏳ Planned |
-| 1.4 | Enriched dashboard | Cards/trends: monthly rent income (sum `bhadu_applied`), collections (sum `jama`), outstanding by property, vacancy rate (empty rooms / total), payment recovery %, aging of outstanding (>1 month) | ⏳ Planned |
-| 1.5 | Properties & rooms management UI | Edit property defaults (rent, maintenance, deposit, common utility), add/edit rooms with addresses | ⏳ Planned |
-| 1.6 | Tenants full CRUD | Edit rent/maintenance/deposit, lease dates, active flag; existing PUT `/api/tenants/{id}` wired into UI | ⏳ Planned |
-| 1.7 | Expense lifecycle | Edit/delete expenses; link to months; show month-over-month expense totals | ⏳ Planned |
-| 1.8 | Bill allocation from UI | Replace "Allocate & Compile" button with a runnable job that reports success/failure counts per tenant | ⏳ Planned |
+| 1.1 | Ledger month selector | `GET /api/ledgers?billing_month={YYYY-MM}` (query param, defaults current), `GET /api/ledgers/months` (distinct months), month dropdown in the Monthly Ledgers tab; kept `/api/ledgers/current` alias | ✅ Done |
+| 1.2 | Ledger editing | `PUT /api/ledgers/{id}` to edit `jama`, `jama_date`, `payment_status`; validated against `tenant_payments` — if RENT payments exist for the tenant+month, `jama` must equal their total (auto-corrects to it, rejects mismatches), so ledger and payments never diverge; `payment_status` auto-derived from `month_total` vs `jama` unless explicitly set | ✅ Done |
+| 1.3 | Payment reconciliation refinements | `POST /api/payments` now accepts an `allocations: [{billing_month, amount}]` list — one payment splits across multiple months (shared `batch_id`, one row per month); advance payments create a placeholder ledger (carrying `prev_baki` forward) that is auto-removed when the last payment in the batch is deleted; `Paid/Partial/Unpaid` auto-recomputed from payment sums via `_sync_ledger_jama`; deleting any row of a batch deletes the whole batch. Migration `002_phase1_payment_batch.sql` adds `tenant_payments.batch_id` | ✅ Done |
+| 1.4 | Enriched dashboard | Cards/trends: monthly rent income (sum `bhadu_applied`), collections (sum `jama`), recovery %, vacancy rate (empty rooms / total), outstanding by property, carried-forward + older-than-current outstanding aging | ✅ Done |
+| 1.5 | Properties & rooms management UI | Properties tab added: list properties with `room_count`/`occupied_rooms`, add property, `PUT /api/properties/{id}` to edit defaults (rent, maintenance, deposit, common utility); rooms list with occupant + add/edit via `PUT /api/rooms/{id}` | ✅ Done |
+| 1.6 | Tenants full CRUD | `PUT /api/tenants/{id}` now optional-fields with partial update: name, room, phone, rent, maintenance, deposit, `is_active`, `lease_start_date`/`lease_end_date` ('' clears); edit modal wired into Tenants table | ✅ Done |
+| 1.7 | Expense lifecycle | `GET /api/expenses?execution_month=`, `GET /api/expenses/months`, `GET /api/expenses/totals` (month-over-month sums), `PUT /api/expenses/{id}`, `DELETE /api/expenses/{id}`; expenses tab has month selector, edit/delete buttons and monthly totals table | ✅ Done |
+| 1.8 | Bill allocation from UI | `allocate_tenant_bills.py` wraps each tenant in a SAVEPOINT, tracks per-tenant success/failure, and prints `ALLOC_REPORT <json>`; `POST /api/operations/allocate-bills` captures it and returns `{total, success, failures[]}`; UI shows an allocation report modal with per-tenant failure reasons. Subprocesses now use `sys.executable` (venv) instead of bare `python3` | ✅ Done |
 
 ---
 
@@ -116,4 +116,5 @@ Goal: safe, monitored, recoverable system.
 ## Current Focus
 
 **Phase 0 (finishing):** item 0.5 only — pipeline scheduling automation (systemd timer). Schema hardening (0.6–0.9) is done.
-**Phase 1 (next):** ledger month selector + ledger editing + enriched dashboard (items 1.1, 1.2, 1.4).
+**Phase 1 (complete):** all of items 1.1–1.8 are done. Phase 1 is fully delivered.
+**Phase 2 (next):** tenant lifecycle — move-in/move-out workflows (2.1, 2.2), deposit ledger (2.3), vacancy report (2.4), lease expiry alerts (2.5).
