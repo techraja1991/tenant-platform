@@ -4,6 +4,8 @@
 
 \restrict 2ACnGTjQlgYQGJ2JaiLrgH9tnw5hMq7BdPSgpd5Tg5U0skGMeDPhMdaWz1fKBzS
 
+\restrict VceGqeLo0bwnBMtSXlPeln0emPYF1JhTzfCXGHqADk18h8Ry1N6tChWKNvRqtEg
+
 -- Dumped from database version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
 
@@ -43,7 +45,9 @@ CREATE TABLE rental_core.gas_bill_master (
     bill_type character varying(50) DEFAULT 'NORMAL'::character varying NOT NULL,
     last_pay_date date,
     execution_month character varying(7) NOT NULL,
-    created_at timestamp without time zone DEFAULT now()
+    created_at timestamp without time zone DEFAULT now(),
+    CONSTRAINT gbm_amount_non_negative_check CHECK ((amount >= (0)::numeric)),
+    CONSTRAINT gbm_execution_month_format_check CHECK (((execution_month)::text ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'::text))
 );
 
 
@@ -129,7 +133,10 @@ CREATE TABLE rental_core.monthly_ledgers (
     common_misc_expenses numeric(10,2) DEFAULT 0.00,
     month_total numeric(10,2) GENERATED ALWAYS AS (((((bhadu_applied + light_bill) + gas_bill) + maintenance_applied) + common_misc_expenses)) STORED,
     gross_baki numeric(10,2) GENERATED ALWAYS AS (((((((prev_baki + bhadu_applied) + light_bill) + gas_bill) + maintenance_applied) + common_misc_expenses) - prev_jama)) STORED,
-    new_baki numeric(10,2) GENERATED ALWAYS AS ((((((((prev_baki + bhadu_applied) + light_bill) + gas_bill) + maintenance_applied) + common_misc_expenses) - prev_jama) - jama)) STORED
+    new_baki numeric(10,2) GENERATED ALWAYS AS ((((((((prev_baki + bhadu_applied) + light_bill) + gas_bill) + maintenance_applied) + common_misc_expenses) - prev_jama) - jama)) STORED,
+    created_at timestamp without time zone DEFAULT now(),
+    CONSTRAINT ml_amounts_non_negative_check CHECK (((prev_baki >= (0)::numeric) AND (prev_jama >= (0)::numeric) AND (bhadu_applied >= (0)::numeric) AND (light_bill >= (0)::numeric) AND (gas_bill >= (0)::numeric) AND (maintenance_applied >= (0)::numeric) AND (jama >= (0)::numeric) AND (common_misc_expenses >= (0)::numeric))),
+    CONSTRAINT ml_billing_month_format_check CHECK (((billing_month)::text ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'::text))
 );
 
 
@@ -158,77 +165,6 @@ ALTER SEQUENCE rental_core.monthly_ledgers_id_seq OWNED BY rental_core.monthly_l
 
 
 --
--- Name: tenant_payments; Type: TABLE; Schema: rental_core; Owner: platform_admin
---
-
-CREATE TABLE rental_core.tenant_payments (
-    id integer NOT NULL,
-    tenant_id integer,
-    room_id integer,
-    billing_month character varying(20) NOT NULL,
-    payment_date date NOT NULL,
-    amount numeric(10,2) NOT NULL,
-    payment_mode character varying(20) DEFAULT 'CASH'::character varying NOT NULL,
-    payment_type character varying(20) DEFAULT 'RENT'::character varying NOT NULL,
-    note text,
-    created_at timestamp without time zone DEFAULT now(),
-    CONSTRAINT tenant_payments_payment_mode_check CHECK (((payment_mode)::text = ANY (ARRAY[('CASH'::character varying)::text, ('UPI'::character varying)::text, ('BANK_TRANSFER'::character varying)::text, ('CARD'::character varying)::text, ('CHEQUE'::character varying)::text]))),
-    CONSTRAINT tenant_payments_payment_type_check CHECK (((payment_type)::text = ANY (ARRAY[('RENT'::character varying)::text, ('DEPOSIT'::character varying)::text])))
-);
-
-
-ALTER TABLE rental_core.tenant_payments OWNER TO platform_admin;
-
---
--- Name: tenant_payments_id_seq; Type: SEQUENCE; Schema: rental_core; Owner: platform_admin
---
-
-CREATE SEQUENCE rental_core.tenant_payments_id_seq
-    AS integer
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
-ALTER SEQUENCE rental_core.tenant_payments_id_seq OWNER TO platform_admin;
-
---
--- Name: tenant_payments_id_seq; Type: SEQUENCE OWNED BY; Schema: rental_core; Owner: platform_admin
---
-
-ALTER SEQUENCE rental_core.tenant_payments_id_seq OWNED BY rental_core.tenant_payments.id;
-
---
--- Name: tenant_payments id; Type: DEFAULT; Schema: rental_core; Owner: platform_admin
---
-
-ALTER TABLE ONLY rental_core.tenant_payments ALTER COLUMN id SET DEFAULT nextval('rental_core.tenant_payments_id_seq'::regclass);
-
---
--- Name: tenant_payments tenant_payments_pkey; Type: CONSTRAINT; Schema: rental_core; Owner: platform_admin
---
-
-ALTER TABLE ONLY rental_core.tenant_payments
-    ADD CONSTRAINT tenant_payments_pkey PRIMARY KEY (id);
-
---
--- Name: tenant_payments tenant_payments_room_id_fkey; Type: FK CONSTRAINT; Schema: rental_core; Owner: platform_admin
---
-
-ALTER TABLE ONLY rental_core.tenant_payments
-    ADD CONSTRAINT tenant_payments_room_id_fkey FOREIGN KEY (room_id) REFERENCES rental_core.rooms(id) ON DELETE SET NULL;
-
---
--- Name: tenant_payments tenant_payments_tenant_id_fkey; Type: FK CONSTRAINT; Schema: rental_core; Owner: platform_admin
---
-
-ALTER TABLE ONLY rental_core.tenant_payments
-    ADD CONSTRAINT tenant_payments_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES rental_core.tenants(id) ON DELETE SET NULL;
-
-
---
 -- Name: property_maintenance_expenses; Type: TABLE; Schema: rental_core; Owner: postgres
 --
 
@@ -241,6 +177,8 @@ CREATE TABLE rental_core.property_maintenance_expenses (
     created_at timestamp without time zone DEFAULT now(),
     charge_type character varying(20) DEFAULT 'SHARED'::character varying NOT NULL,
     room_id integer,
+    CONSTRAINT pme_amount_non_negative_check CHECK ((amount >= (0)::numeric)),
+    CONSTRAINT pme_execution_month_format_check CHECK (((execution_month)::text ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'::text)),
     CONSTRAINT property_maintenance_expenses_charge_type_check CHECK (((charge_type)::text = ANY ((ARRAY['SHARED'::character varying, 'UNIT'::character varying, 'OWNER'::character varying])::text[])))
 );
 
@@ -281,7 +219,8 @@ CREATE TABLE rental_core.property_masters (
     default_maintenance_fee numeric(10,2) DEFAULT 0.00 NOT NULL,
     default_security_deposit numeric(10,2) DEFAULT 5000.00 NOT NULL,
     created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
-    default_common_utility numeric(10,2) DEFAULT 0.00
+    default_common_utility numeric(10,2) DEFAULT 0.00,
+    CONSTRAINT pm_amounts_non_negative_check CHECK (((default_base_rent >= (0)::numeric) AND (default_maintenance_fee >= (0)::numeric) AND (default_security_deposit >= (0)::numeric) AND (default_common_utility >= (0)::numeric)))
 );
 
 
@@ -359,7 +298,8 @@ CREATE TABLE rental_core.tenant_ledgers (
     common_utility_share numeric(10,2) DEFAULT 0.00,
     total_due numeric(10,2) DEFAULT 0.00,
     payment_status character varying(20) DEFAULT 'UNPAID'::character varying,
-    created_at timestamp without time zone DEFAULT now()
+    created_at timestamp without time zone DEFAULT now(),
+    CONSTRAINT tl_execution_month_format_check CHECK (((execution_month)::text ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'::text))
 );
 
 
@@ -388,6 +328,52 @@ ALTER SEQUENCE rental_core.tenant_ledgers_id_seq OWNED BY rental_core.tenant_led
 
 
 --
+-- Name: tenant_payments; Type: TABLE; Schema: rental_core; Owner: platform_admin
+--
+
+CREATE TABLE rental_core.tenant_payments (
+    id integer NOT NULL,
+    tenant_id integer,
+    room_id integer,
+    billing_month character varying(20) NOT NULL,
+    payment_date date NOT NULL,
+    amount numeric(10,2) NOT NULL,
+    payment_mode character varying(20) DEFAULT 'CASH'::character varying NOT NULL,
+    payment_type character varying(20) DEFAULT 'RENT'::character varying NOT NULL,
+    note text,
+    created_at timestamp without time zone DEFAULT now(),
+    CONSTRAINT tenant_payments_payment_mode_check CHECK (((payment_mode)::text = ANY (ARRAY[('CASH'::character varying)::text, ('UPI'::character varying)::text, ('BANK_TRANSFER'::character varying)::text, ('CARD'::character varying)::text, ('CHEQUE'::character varying)::text]))),
+    CONSTRAINT tenant_payments_payment_type_check CHECK (((payment_type)::text = ANY (ARRAY[('RENT'::character varying)::text, ('DEPOSIT'::character varying)::text]))),
+    CONSTRAINT tp_amount_positive_check CHECK ((amount > (0)::numeric)),
+    CONSTRAINT tp_billing_month_format_check CHECK (((billing_month)::text ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'::text))
+);
+
+
+ALTER TABLE rental_core.tenant_payments OWNER TO platform_admin;
+
+--
+-- Name: tenant_payments_id_seq; Type: SEQUENCE; Schema: rental_core; Owner: platform_admin
+--
+
+CREATE SEQUENCE rental_core.tenant_payments_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE rental_core.tenant_payments_id_seq OWNER TO platform_admin;
+
+--
+-- Name: tenant_payments_id_seq; Type: SEQUENCE OWNED BY; Schema: rental_core; Owner: platform_admin
+--
+
+ALTER SEQUENCE rental_core.tenant_payments_id_seq OWNED BY rental_core.tenant_payments.id;
+
+
+--
 -- Name: tenants; Type: TABLE; Schema: rental_core; Owner: platform_admin
 --
 
@@ -401,7 +387,9 @@ CREATE TABLE rental_core.tenants (
     maintenance_applied numeric(10,2) NOT NULL,
     security_deposit_applied numeric(10,2) NOT NULL,
     lease_start_date date DEFAULT CURRENT_DATE,
-    lease_end_date date
+    lease_end_date date,
+    CONSTRAINT tenants_amounts_non_negative_check CHECK (((base_rent_applied >= (0)::numeric) AND (maintenance_applied >= (0)::numeric) AND (security_deposit_applied >= (0)::numeric))),
+    CONSTRAINT tenants_is_active_check CHECK (((is_active IS NULL) OR (is_active = ANY (ARRAY['Y'::bpchar, 'N'::bpchar]))))
 );
 
 
@@ -480,7 +468,9 @@ CREATE TABLE rental_core.torrent_bill_master (
     bill_type character varying(20),
     last_pay_date timestamp without time zone,
     execution_month character varying(7),
-    created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP
+    created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT tbm_amount_non_negative_check CHECK (((amount IS NULL) OR (amount >= (0)::numeric))),
+    CONSTRAINT tbm_execution_month_format_check CHECK (((execution_month IS NULL) OR ((execution_month)::text ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'::text)))
 );
 
 
@@ -595,6 +585,13 @@ ALTER TABLE ONLY rental_core.tenant_ledgers ALTER COLUMN id SET DEFAULT nextval(
 
 
 --
+-- Name: tenant_payments id; Type: DEFAULT; Schema: rental_core; Owner: platform_admin
+--
+
+ALTER TABLE ONLY rental_core.tenant_payments ALTER COLUMN id SET DEFAULT nextval('rental_core.tenant_payments_id_seq'::regclass);
+
+
+--
 -- Name: tenants id; Type: DEFAULT; Schema: rental_core; Owner: platform_admin
 --
 
@@ -695,6 +692,14 @@ ALTER TABLE ONLY rental_core.tenant_ledgers
 
 
 --
+-- Name: tenant_payments tenant_payments_pkey; Type: CONSTRAINT; Schema: rental_core; Owner: platform_admin
+--
+
+ALTER TABLE ONLY rental_core.tenant_payments
+    ADD CONSTRAINT tenant_payments_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: tenants tenants_pkey; Type: CONSTRAINT; Schema: rental_core; Owner: platform_admin
 --
 
@@ -775,11 +780,122 @@ ALTER TABLE ONLY rental_core.utility_metrics
 
 
 --
--- Name: utility_metrics utility_metrics_service_number_key; Type: CONSTRAINT; Schema: rental_core; Owner: platform_admin
+-- Name: idx_gas_bill_master_execution_month; Type: INDEX; Schema: rental_core; Owner: postgres
 --
 
-ALTER TABLE ONLY rental_core.utility_metrics
-    ADD CONSTRAINT utility_metrics_service_number_key UNIQUE (service_number);
+CREATE INDEX idx_gas_bill_master_execution_month ON rental_core.gas_bill_master USING btree (execution_month);
+
+
+--
+-- Name: idx_gas_metrics_room_id; Type: INDEX; Schema: rental_core; Owner: postgres
+--
+
+CREATE INDEX idx_gas_metrics_room_id ON rental_core.gas_metrics USING btree (room_id);
+
+
+--
+-- Name: idx_monthly_ledgers_billing_month; Type: INDEX; Schema: rental_core; Owner: platform_admin
+--
+
+CREATE INDEX idx_monthly_ledgers_billing_month ON rental_core.monthly_ledgers USING btree (billing_month);
+
+
+--
+-- Name: idx_monthly_ledgers_room_id; Type: INDEX; Schema: rental_core; Owner: platform_admin
+--
+
+CREATE INDEX idx_monthly_ledgers_room_id ON rental_core.monthly_ledgers USING btree (room_id);
+
+
+--
+-- Name: idx_pme_execution_month; Type: INDEX; Schema: rental_core; Owner: postgres
+--
+
+CREATE INDEX idx_pme_execution_month ON rental_core.property_maintenance_expenses USING btree (execution_month);
+
+
+--
+-- Name: idx_pme_room_id; Type: INDEX; Schema: rental_core; Owner: postgres
+--
+
+CREATE INDEX idx_pme_room_id ON rental_core.property_maintenance_expenses USING btree (room_id);
+
+
+--
+-- Name: idx_rooms_master_id; Type: INDEX; Schema: rental_core; Owner: platform_admin
+--
+
+CREATE INDEX idx_rooms_master_id ON rental_core.rooms USING btree (master_id);
+
+
+--
+-- Name: idx_tenant_ledgers_execution_month; Type: INDEX; Schema: rental_core; Owner: postgres
+--
+
+CREATE INDEX idx_tenant_ledgers_execution_month ON rental_core.tenant_ledgers USING btree (execution_month);
+
+
+--
+-- Name: idx_tenant_ledgers_room_id; Type: INDEX; Schema: rental_core; Owner: postgres
+--
+
+CREATE INDEX idx_tenant_ledgers_room_id ON rental_core.tenant_ledgers USING btree (room_id);
+
+
+--
+-- Name: idx_tenant_payments_billing_month; Type: INDEX; Schema: rental_core; Owner: platform_admin
+--
+
+CREATE INDEX idx_tenant_payments_billing_month ON rental_core.tenant_payments USING btree (billing_month);
+
+
+--
+-- Name: idx_tenant_payments_room_id; Type: INDEX; Schema: rental_core; Owner: platform_admin
+--
+
+CREATE INDEX idx_tenant_payments_room_id ON rental_core.tenant_payments USING btree (room_id);
+
+
+--
+-- Name: idx_tenant_payments_tenant_id; Type: INDEX; Schema: rental_core; Owner: platform_admin
+--
+
+CREATE INDEX idx_tenant_payments_tenant_id ON rental_core.tenant_payments USING btree (tenant_id);
+
+
+--
+-- Name: idx_tenants_is_active; Type: INDEX; Schema: rental_core; Owner: platform_admin
+--
+
+CREATE INDEX idx_tenants_is_active ON rental_core.tenants USING btree (is_active);
+
+
+--
+-- Name: idx_tenants_room_id; Type: INDEX; Schema: rental_core; Owner: platform_admin
+--
+
+CREATE INDEX idx_tenants_room_id ON rental_core.tenants USING btree (room_id);
+
+
+--
+-- Name: idx_torrent_bill_master_execution_month; Type: INDEX; Schema: rental_core; Owner: postgres
+--
+
+CREATE INDEX idx_torrent_bill_master_execution_month ON rental_core.torrent_bill_master USING btree (execution_month);
+
+
+--
+-- Name: idx_utility_metrics_account_id; Type: INDEX; Schema: rental_core; Owner: platform_admin
+--
+
+CREATE INDEX idx_utility_metrics_account_id ON rental_core.utility_metrics USING btree (account_id);
+
+
+--
+-- Name: idx_utility_metrics_room_id; Type: INDEX; Schema: rental_core; Owner: platform_admin
+--
+
+CREATE INDEX idx_utility_metrics_room_id ON rental_core.utility_metrics USING btree (room_id);
 
 
 --
@@ -823,6 +939,14 @@ ALTER TABLE ONLY rental_core.property_maintenance_expenses
 
 
 --
+-- Name: property_maintenance_expenses property_maintenance_expenses_room_id_fkey; Type: FK CONSTRAINT; Schema: rental_core; Owner: postgres
+--
+
+ALTER TABLE ONLY rental_core.property_maintenance_expenses
+    ADD CONSTRAINT property_maintenance_expenses_room_id_fkey FOREIGN KEY (room_id) REFERENCES rental_core.rooms(id) ON DELETE SET NULL;
+
+
+--
 -- Name: rooms rooms_master_id_fkey; Type: FK CONSTRAINT; Schema: rental_core; Owner: platform_admin
 --
 
@@ -836,6 +960,22 @@ ALTER TABLE ONLY rental_core.rooms
 
 ALTER TABLE ONLY rental_core.tenant_ledgers
     ADD CONSTRAINT tenant_ledgers_room_id_fkey FOREIGN KEY (room_id) REFERENCES rental_core.rooms(id) ON DELETE CASCADE;
+
+
+--
+-- Name: tenant_payments tenant_payments_room_id_fkey; Type: FK CONSTRAINT; Schema: rental_core; Owner: platform_admin
+--
+
+ALTER TABLE ONLY rental_core.tenant_payments
+    ADD CONSTRAINT tenant_payments_room_id_fkey FOREIGN KEY (room_id) REFERENCES rental_core.rooms(id) ON DELETE SET NULL;
+
+
+--
+-- Name: tenant_payments tenant_payments_tenant_id_fkey; Type: FK CONSTRAINT; Schema: rental_core; Owner: platform_admin
+--
+
+ALTER TABLE ONLY rental_core.tenant_payments
+    ADD CONSTRAINT tenant_payments_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES rental_core.tenants(id) ON DELETE SET NULL;
 
 
 --
@@ -971,5 +1111,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA rental_core GRANT ALL ON TA
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 2ACnGTjQlgYQGJ2JaiLrgH9tnw5hMq7BdPSgpd5Tg5U0skGMeDPhMdaWz1fKBzS
+\unrestrict VceGqeLo0bwnBMtSXlPeln0emPYF1JhTzfCXGHqADk18h8Ry1N6tChWKNvRqtEg
 
+\unrestrict 2ACnGTjQlgYQGJ2JaiLrgH9tnw5hMq7BdPSgpd5Tg5U0skGMeDPhMdaWz1fKBzS

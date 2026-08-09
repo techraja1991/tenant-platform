@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 from db_config import get_db_connection
 
@@ -53,10 +53,10 @@ def get_db():
 class PropertyCreate(BaseModel):
     apartment_name: str
     plot_number: str
-    default_base_rent: Optional[float] = 3300.00
-    default_maintenance_fee: Optional[float] = 0.00
-    default_security_deposit: Optional[float] = 5000.00
-    default_common_utility: Optional[float] = 0.00
+    default_base_rent: Optional[float] = Field(default=3300.00, ge=0)
+    default_maintenance_fee: Optional[float] = Field(default=0.00, ge=0)
+    default_security_deposit: Optional[float] = Field(default=5000.00, ge=0)
+    default_common_utility: Optional[float] = Field(default=0.00, ge=0)
 
 class RoomCreate(BaseModel):
     master_id: int
@@ -67,24 +67,24 @@ class TenantCreate(BaseModel):
     room_id: int
     tenant_name: str
     phone_number: str
-    base_rent_applied: float
-    maintenance_applied: Optional[float] = 0.00
-    security_deposit_applied: Optional[float] = 0.00
+    base_rent_applied: float = Field(ge=0)
+    maintenance_applied: Optional[float] = Field(default=0.00, ge=0)
+    security_deposit_applied: Optional[float] = Field(default=0.00, ge=0)
 
 class MaintenanceExpenseCreate(BaseModel):
     master_id: int
     expense_name: str
-    amount: float
-    charge_type: Optional[str] = "SHARED"
+    amount: float = Field(gt=0)
+    charge_type: Optional[str] = Field(default="SHARED", pattern="^(SHARED|UNIT|OWNER)$")
     room_id: Optional[int] = None
 
 class PaymentCreate(BaseModel):
     tenant_id: int
-    billing_month: str
+    billing_month: str = Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
     payment_date: str
-    amount: float
-    payment_mode: Optional[str] = "CASH"
-    payment_type: Optional[str] = "RENT"
+    amount: float = Field(gt=0)
+    payment_mode: Optional[str] = Field(default="CASH", pattern="^(CASH|UPI|BANK_TRANSFER|CARD|CHEQUE)$")
+    payment_type: Optional[str] = Field(default="RENT", pattern="^(RENT|DEPOSIT)$")
     note: Optional[str] = None
 
 class ElectricMappingCreate(BaseModel):
