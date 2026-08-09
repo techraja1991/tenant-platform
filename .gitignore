@@ -1,0 +1,16 @@
+# Environment / credentials
+.env
+
+# Python virtualenv & bytecode
+venv/
+__pycache__/
+*.pyc
+
+# Certificates / TLS private keys
+certs/
+
+# Runtime logs & artifacts
+*.log
+
+# Data files (secret tokens, feeds, generated exports)
+*.csv

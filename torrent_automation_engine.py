@@ -1,7 +1,6 @@
 import os
 import base64
 import requests
-import psycopg2
 import logging
 import csv
 import json
@@ -9,9 +8,9 @@ import re
 import time
 import random
 from datetime import datetime
+from db_config import get_db_connection
 
 # --- CONFIGURATION ---
-DB_PARAMS = {"dbname": "tenant_management_db", "user": "platform_admin", "password": "tenantDB@2026", "host": "localhost"}
 
 logging.basicConfig(filename='automation_engine.log', level=logging.INFO, 
                     format='%(asctime)s - %(levelname)s - %(message)s')
@@ -45,7 +44,7 @@ def determine_bill_type(last_pay_str):
     return "NOTICE" if pay_date < start_of_last_month else "NORMAL"
 
 def run_multi_account_pipeline():
-    conn = psycopg2.connect(**DB_PARAMS)
+    conn = get_db_connection()
     cur = conn.cursor()
     execution_month = datetime.now().strftime('%Y-%m')
     

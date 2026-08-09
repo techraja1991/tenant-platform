@@ -1,15 +1,10 @@
 import os
 import csv
-import psycopg2
 from datetime import datetime
+from db_config import get_db_connection
 
 # --- CONFIGURATION ---
-DB_PARAMS = {
-    "dbname": "tenant_management_db",
-    "user": "platform_admin",
-    "password": "tenantDB@2026",
-    "host": "localhost"
-}
+
 
 CSV_FILENAME = "gujarat_gas_data.csv"
 
@@ -45,7 +40,7 @@ def process_gas_pipeline():
         print(f"❌ Aborted: Target source file '{CSV_FILENAME}' not found.")
         return
 
-    conn = psycopg2.connect(**DB_PARAMS)
+    conn = get_db_connection()
     cur = conn.cursor()
     
     execution_month = datetime.now().strftime('%Y-%m')

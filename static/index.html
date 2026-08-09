@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Property & Tenant Management Admin</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body class="bg-slate-900 text-slate-100 font-sans min-h-screen" x-data="adminApp()" x-init="initData()">
+
+    <div class="flex h-screen overflow-hidden">
+        <!-- Sidebar Navigation -->
+        <aside class="w-64 bg-slate-800 border-r border-slate-700 flex flex-col">
+            <div class="p-5 text-xl font-bold text-indigo-400 flex items-center gap-2 border-b border-slate-700">
+                <i class="fa-solid fa-building"></i> RentalAdmin
+            </div>
+            <nav class="flex-1 p-4 space-y-2">
+                <button @click="currentTab = 'dashboard'" :class="currentTab === 'dashboard' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-700'" class="w-full text-left px-4 py-3 rounded-lg font-medium flex items-center gap-3">
+                    <i class="fa-solid fa-chart-pie"></i> Dashboard
+                </button>
+                <button @click="currentTab = 'tenants'" :class="currentTab === 'tenants' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-700'" class="w-full text-left px-4 py-3 rounded-lg font-medium flex items-center gap-3">
+                    <i class="fa-solid fa-users"></i> Tenants
+                </button>
+                <button @click="currentTab = 'properties'" :class="currentTab === 'properties' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-700'" class="w-full text-left px-4 py-3 rounded-lg font-medium flex items-center gap-3">
+                    <i class="fa-solid fa-city"></i> Properties & Rooms
+                </button>
+                <button @click="currentTab = 'expenses'" :class="currentTab === 'expenses' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-700'" class="w-full text-left px-4 py-3 rounded-lg font-medium flex items-center gap-3">
+                    <i class="fa-solid fa-wrench"></i> Maintenance Expenses
+                </button>
+                <button @click="currentTab = 'ledgers'" :class="currentTab === 'ledgers' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-700'" class="w-full text-left px-4 py-3 rounded-lg font-medium flex items-center gap-3">
+                    <i class="fa-solid fa-file-invoice-dollar"></i> Monthly Ledgers
+                </button>
+                <button @click="currentTab = 'payments'" :class="currentTab === 'payments' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-700'" class="w-full text-left px-4 py-3 rounded-lg font-medium flex items-center gap-3">
+                    <i class="fa-solid fa-money-check-dollar"></i> Tenant Payments
+                </button>
+            </nav>
+        </aside>
+
+        <!-- Main Body -->
+        <main class="flex-1 overflow-y-auto p-8">
+            
+            <!-- 1. DASHBOARD VIEW -->
+            <div x-show="currentTab === 'dashboard'" class="space-y-6">
+                <h1 class="text-3xl font-bold">Executive Dashboard</h1>
+                
+                <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
+                    <div class="bg-slate-800 p-6 rounded-xl border border-slate-700">
+                        <div class="text-slate-400 text-sm">Active Properties</div>
+                        <div class="text-3xl font-bold mt-2" x-text="stats.properties">0</div>
+                    </div>
+                    <div class="bg-slate-800 p-6 rounded-xl border border-slate-700">
+                        <div class="text-slate-400 text-sm">Total Rooms</div>
+                        <div class="text-3xl font-bold mt-2" x-text="stats.rooms">0</div>
+                    </div>
+                    <div class="bg-slate-800 p-6 rounded-xl border border-slate-700">
+                        <div class="text-slate-400 text-sm">Active Tenants</div>
+                        <div class="text-3xl font-bold mt-2 text-emerald-400" x-text="stats.active_tenants">0</div>
+                    </div>
+                    <div class="bg-slate-800 p-6 rounded-xl border border-slate-700">
+                        <div class="text-slate-400 text-sm">Outstanding Due</div>
+                        <div class="text-3xl font-bold mt-2 text-indigo-400" x-text="'₹' + stats.total_outstanding_due">₹0</div>
+                    </div>
+                </div>
+
+                <!-- Operations Control Center -->
+                <div class="bg-slate-800 p-6 rounded-xl border border-slate-700 mt-8">
+                    <h2 class="text-xl font-bold mb-4">Operations Control Center</h2>
+                    <div class="flex flex-wrap gap-4">
+                        <button @click="triggerScraper()" class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2.5 rounded-lg font-medium flex items-center gap-2">
+                            <i class="fa-solid fa-bolt"></i> Run Electricity Scraper
+                        </button>
+                        <button @click="triggerGasImport()" class="bg-amber-600 hover:bg-amber-500 text-white px-5 py-2.5 rounded-lg font-medium flex items-center gap-2">
+                            <i class="fa-solid fa-fire"></i> Import Gas CSV
+                        </button>
+                        <button @click="triggerAllocation()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-2.5 rounded-lg font-medium flex items-center gap-2">
+                            <i class="fa-solid fa-calculator"></i> Allocate & Compile Monthly Bills
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 2. TENANTS MANAGEMENT VIEW -->
+            <div x-show="currentTab === 'tenants'" class="space-y-6">
+                <div class="flex justify-between items-center">
+                    <h1 class="text-3xl font-bold">Tenant Directory</h1>
+                    <button @click="showAddTenantModal = true" class="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg font-medium">
+                        + Add New Tenant
+                    </button>
+                </div>
+
+                <div class="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
+                    <table class="w-full text-left border-collapse">
+                        <thead class="bg-slate-700/50 text-slate-300">
+                            <tr>
+                                <th class="p-4">ID</th>
+                                <th class="p-4">Tenant Name</th>
+                                <th class="p-4">Room Address</th>
+                                <th class="p-4">Phone Number</th>
+                                <th class="p-4">Base Rent</th>
+                                <th class="p-4">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-700">
+                            <template x-for="tenant in tenants" :key="tenant.id">
+                                <tr class="hover:bg-slate-700/30">
+                                    <td class="p-4" x-text="tenant.id"></td>
+                                    <td class="p-4 font-semibold" x-text="tenant.tenant_name"></td>
+                                    <td class="p-4" x-text="tenant.display_address"></td>
+                                    <td class="p-4" x-text="tenant.phone_number"></td>
+                                    <td class="p-4 text-emerald-400 font-medium" x-text="'₹' + tenant.base_rent_applied"></td>
+                                    <td class="p-4">
+                                        <span class="px-2.5 py-1 rounded-full text-xs font-bold" :class="tenant.is_active === 'Y' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'" x-text="tenant.is_active === 'Y' ? 'ACTIVE' : 'INACTIVE'"></span>
+                                    </td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 3. MAINTENANCE EXPENSES VIEW -->
+            <div x-show="currentTab === 'expenses'" class="space-y-6">
+                <div class="flex justify-between items-center">
+                    <h1 class="text-3xl font-bold">Logged Property Expenses</h1>
+                    <button @click="showAddExpenseModal = true" class="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg font-medium">
+                        + Log New Expense
+                    </button>
+                </div>
+
+                <div class="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
+                    <table class="w-full text-left border-collapse">
+                        <thead class="bg-slate-700/50 text-slate-300">
+                            <tr>
+                                <th class="p-4">ID</th>
+                                <th class="p-4">Property</th>
+                                <th class="p-4">Expense Description</th>
+                                <th class="p-4">Type</th>
+                                <th class="p-4">Unit</th>
+                                <th class="p-4">Amount</th>
+                                <th class="p-4">Execution Month</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-700">
+                            <template x-for="exp in expenses" :key="exp.id">
+                                <tr class="hover:bg-slate-700/30">
+                                    <td class="p-4" x-text="exp.id"></td>
+                                    <td class="p-4 font-semibold" x-text="exp.apartment_name"></td>
+                                    <td class="p-4" x-text="exp.expense_name"></td>
+                                    <td class="p-4">
+                                        <span class="px-2 py-0.5 rounded text-xs font-bold bg-slate-600/40 text-slate-300" x-text="exp.charge_type"></span>
+                                    </td>
+                                    <td class="p-4 text-slate-400" x-text="exp.room_address || '—'"></td>
+                                    <td class="p-4 text-rose-400 font-bold" x-text="'₹' + exp.amount"></td>
+                                    <td class="p-4 text-slate-400" x-text="exp.execution_month"></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 4. MONTHLY LEDGERS VIEW -->
+            <div x-show="currentTab === 'ledgers'" class="space-y-6">
+                <h1 class="text-3xl font-bold">Monthly Ledgers</h1>
+                <div class="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
+                    <table class="w-full text-left border-collapse text-sm">
+                        <thead class="bg-slate-700/50 text-slate-300">
+                            <tr>
+                                <th class="p-3">Address</th>
+                                <th class="p-3">Tenant Name</th>
+                                <th class="p-3">Prev Debt</th>
+                                <th class="p-3">Rent</th>
+                                <th class="p-3">Light Bill</th>
+                                <th class="p-3">Gas Bill</th>
+                                <th class="p-3">Maint.</th>
+                                <th class="p-3">Misc</th>
+                                <th class="p-3 font-bold text-indigo-400">Total Due</th>
+                                <th class="p-3">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-700">
+                            <template x-for="ledger in ledgers" :key="ledger.id">
+                                <tr class="hover:bg-slate-700/30">
+                                    <td class="p-3 font-semibold" x-text="ledger.display_address"></td>
+                                    <td class="p-3" x-text="ledger.tenant_name"></td>
+                                    <td class="p-3 text-slate-400" x-text="'₹' + ledger.prev_baki"></td>
+                                    <td class="p-3" x-text="'₹' + ledger.bhadu_applied"></td>
+                                    <td class="p-3" x-text="'₹' + ledger.light_bill"></td>
+                                    <td class="p-3" x-text="'₹' + ledger.gas_bill"></td>
+                                    <td class="p-3" x-text="'₹' + ledger.maintenance_applied"></td>
+                                    <td class="p-3" x-text="'₹' + ledger.common_misc_expenses"></td>
+                                    <td class="p-3 font-bold text-emerald-400 text-base" x-text="'₹' + ledger.new_baki"></td>
+                                    <td class="p-3">
+                                        <span class="px-2 py-0.5 rounded text-xs font-bold bg-amber-500/20 text-amber-400" x-text="ledger.payment_status"></span>
+                                    </td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 5. TENANT PAYMENTS VIEW -->
+            <div x-show="currentTab === 'payments'" class="space-y-6">
+                <div class="flex justify-between items-center flex-wrap gap-4">
+                    <h1 class="text-3xl font-bold">Tenant Payments</h1>
+                    <div class="flex gap-2 items-center">
+                        <select x-model="paymentsMonth" @change="fetchPayments()" class="bg-slate-900 border border-slate-700 rounded p-2 text-sm">
+                            <template x-for="m in monthOptions" :key="m.value">
+                                <option :value="m.value" x-text="m.label"></option>
+                            </template>
+                        </select>
+                        <button @click="openAddPaymentModal()" class="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg font-medium">
+                            + Record Payment
+                        </button>
+                    </div>
+                </div>
+
+                <div class="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
+                    <table class="w-full text-left border-collapse text-sm">
+                        <thead class="bg-slate-700/50 text-slate-300">
+                            <tr>
+                                <th class="p-3">ID</th>
+                                <th class="p-3">Date</th>
+                                <th class="p-3">Tenant</th>
+                                <th class="p-3">Room</th>
+                                <th class="p-3">Type</th>
+                                <th class="p-3">Mode</th>
+                                <th class="p-3">Amount</th>
+                                <th class="p-3">Note</th>
+                                <th class="p-3"></th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-700">
+                            <template x-for="pay in payments" :key="pay.id">
+                                <tr class="hover:bg-slate-700/30">
+                                    <td class="p-3 text-slate-400" x-text="pay.id"></td>
+                                    <td class="p-3" x-text="pay.payment_date"></td>
+                                    <td class="p-3 font-semibold" x-text="pay.tenant_name || '—'"></td>
+                                    <td class="p-3 text-slate-400" x-text="pay.display_address || '—'"></td>
+                                    <td class="p-3">
+                                        <span class="px-2 py-0.5 rounded text-xs font-bold" :class="pay.payment_type === 'RENT' ? 'bg-indigo-500/20 text-indigo-400' : 'bg-amber-500/20 text-amber-400'" x-text="pay.payment_type"></span>
+                                    </td>
+                                    <td class="p-3 text-slate-400" x-text="pay.payment_mode"></td>
+                                    <td class="p-3 font-bold text-emerald-400" x-text="'₹' + pay.amount"></td>
+                                    <td class="p-3 text-slate-400" x-text="pay.note || '—'"></td>
+                                    <td class="p-3">
+                                        <button @click="deletePayment(pay.id)" class="text-rose-400 hover:text-rose-300" title="Delete payment">
+                                            <i class="fa-solid fa-trash-can"></i>
+                                        </button>
+                                    </td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Deposit status summary -->
+                <div class="bg-slate-800 p-6 rounded-xl border border-slate-700">
+                    <h2 class="text-xl font-bold mb-4">Security Deposit Status</h2>
+                    <table class="w-full text-left border-collapse text-sm">
+                        <thead class="bg-slate-700/50 text-slate-300">
+                            <tr>
+                                <th class="p-3">Tenant</th>
+                                <th class="p-3">Room</th>
+                                <th class="p-3">Required Deposit</th>
+                                <th class="p-3">Received</th>
+                                <th class="p-3">Pending</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-700">
+                            <template x-for="dep in deposits" :key="dep.tenant_id">
+                                <tr class="hover:bg-slate-700/30">
+                                    <td class="p-3 font-semibold" x-text="dep.tenant_name"></td>
+                                    <td class="p-3 text-slate-400" x-text="dep.display_address || '—'"></td>
+                                    <td class="p-3" x-text="'₹' + dep.required_deposit"></td>
+                                    <td class="p-3 text-emerald-400" x-text="'₹' + dep.deposit_received"></td>
+                                    <td class="p-3 font-bold" :class="dep.required_deposit - dep.deposit_received > 0 ? 'text-rose-400' : 'text-emerald-400'" x-text="'₹' + (dep.required_deposit - dep.deposit_received)"></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+        </main>
+    </div>
+
+    <!-- ADD TENANT MODAL -->    <div x-show="showAddTenantModal" class="fixed inset-0 bg-black/70 flex items-center justify-center p-4">
+        <div class="bg-slate-800 rounded-xl p-6 border border-slate-700 max-w-md w-full space-y-4">
+            <h2 class="text-xl font-bold">Add New Tenant</h2>
+            <div>
+                <label class="text-sm text-slate-400">Room ID</label>
+                <select x-model="newTenant.room_id" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                    <template x-for="room in rooms" :key="room.id">
+                        <option :value="room.id" x-text="room.display_address"></option>
+                    </template>
+                </select>
+            </div>
+            <div>
+                <label class="text-sm text-slate-400">Tenant Full Name</label>
+                <input type="text" x-model="newTenant.tenant_name" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="John Doe">
+            </div>
+            <div>
+                <label class="text-sm text-slate-400">Phone Number (WhatsApp)</label>
+                <input type="text" x-model="newTenant.phone_number" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="9876543210">
+            </div>
+            <div>
+                <label class="text-sm text-slate-400">Applied Rent (₹)</label>
+                <input type="number" x-model="newTenant.base_rent_applied" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="3300">
+            </div>
+            <div class="flex justify-end gap-2 mt-4">
+                <button @click="showAddTenantModal = false" class="px-4 py-2 bg-slate-700 rounded hover:bg-slate-600">Cancel</button>
+                <button @click="submitTenant()" class="px-4 py-2 bg-indigo-600 rounded hover:bg-indigo-500">Save Tenant</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ADD EXPENSE MODAL -->
+    <div x-show="showAddExpenseModal" class="fixed inset-0 bg-black/70 flex items-center justify-center p-4">
+        <div class="bg-slate-800 rounded-xl p-6 border border-slate-700 max-w-md w-full space-y-4">
+            <h2 class="text-xl font-bold">Log Maintenance Expense</h2>
+            <div>
+                <label class="text-sm text-slate-400">Property Complex</label>
+                <select x-model="newExpense.master_id" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                    <template x-for="prop in properties" :key="prop.id">
+                        <option :value="prop.id" x-text="prop.apartment_name"></option>
+                    </template>
+                </select>
+            </div>
+            <div>
+                <label class="text-sm text-slate-400">Expense Type</label>
+                <select x-model="newExpense.charge_type" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                    <option value="SHARED">Shared - split among all units</option>
+                    <option value="UNIT">Specific unit only</option>
+                    <option value="OWNER">Owner expense - not charged to tenant</option>
+                </select>
+            </div>
+            <div x-show="newExpense.charge_type === 'UNIT'">
+                <label class="text-sm text-slate-400">Charge To Unit</label>
+                <select x-model="newExpense.room_id" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                    <template x-for="room in rooms" :key="room.id">
+                        <option :value="room.id" x-text="room.display_address"></option>
+                    </template>
+                </select>
+            </div>
+            <div>
+                <label class="text-sm text-slate-400">Expense Description</label>
+                <input type="text" x-model="newExpense.expense_name" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="Plumbing / Water Pump Repair">
+            </div>
+            <div>
+                <label class="text-sm text-slate-400">Amount (₹)</label>
+                <input type="number" x-model="newExpense.amount" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="1500">
+            </div>
+            <div class="flex justify-end gap-2 mt-4">
+                <button @click="showAddExpenseModal = false" class="px-4 py-2 bg-slate-700 rounded hover:bg-slate-600">Cancel</button>
+                <button @click="submitExpense()" class="px-4 py-2 bg-indigo-600 rounded hover:bg-indigo-500">Save Expense</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ADD PAYMENT MODAL -->
+    <div x-show="showAddPaymentModal" class="fixed inset-0 bg-black/70 flex items-center justify-center p-4">
+        <div class="bg-slate-800 rounded-xl p-6 border border-slate-700 max-w-md w-full space-y-4">
+            <h2 class="text-xl font-bold">Record Payment</h2>
+            <div>
+                <label class="text-sm text-slate-400">Tenant</label>
+                <select x-model="newPayment.tenant_id" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                    <template x-for="tenant in activeTenants" :key="tenant.id">
+                        <option :value="tenant.id" x-text="tenant.tenant_name + ' — ' + (tenant.display_address || '')"></option>
+                    </template>
+                </select>
+            </div>
+            <div>
+                <label class="text-sm text-slate-400">Billing Month</label>
+                <input type="month" x-model="newPayment.billing_month" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+            </div>
+            <div>
+                <label class="text-sm text-slate-400">Payment Date</label>
+                <input type="date" x-model="newPayment.payment_date" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="text-sm text-slate-400">Amount (₹)</label>
+                    <input type="number" x-model="newPayment.amount" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="3300">
+                </div>
+                <div>
+                    <label class="text-sm text-slate-400">Payment Mode</label>
+                    <select x-model="newPayment.payment_mode" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                        <option value="CASH">Cash</option>
+                        <option value="UPI">UPI</option>
+                        <option value="BANK_TRANSFER">Bank Transfer</option>
+                        <option value="CARD">Card</option>
+                        <option value="CHEQUE">Cheque</option>
+                    </select>
+                </div>
+            </div>
+            <div>
+                <label class="text-sm text-slate-400">Payment Type</label>
+                <select x-model="newPayment.payment_type" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1">
+                    <option value="RENT">Rent</option>
+                    <option value="DEPOSIT">Security Deposit</option>
+                </select>
+            </div>
+            <div>
+                <label class="text-sm text-slate-400">Note (optional)</label>
+                <input type="text" x-model="newPayment.note" class="w-full bg-slate-900 border border-slate-700 rounded p-2 mt-1" placeholder="e.g. 2 months advance">
+            </div>
+            <div class="flex justify-end gap-2 mt-4">
+                <button @click="showAddPaymentModal = false" class="px-4 py-2 bg-slate-700 rounded hover:bg-slate-600">Cancel</button>
+                <button @click="submitPayment()" class="px-4 py-2 bg-indigo-600 rounded hover:bg-indigo-500">Save Payment</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function adminApp() {
+            return {
+                currentTab: 'dashboard',
+                stats: {},
+                tenants: [],
+                ledgers: [],
+                rooms: [],
+                properties: [],
+                expenses: [],
+                payments: [],
+                deposits: [],
+                paymentsMonth: new Date().getFullYear() + '-' + String(new Date().getMonth() + 1).padStart(2, '0'),
+                showAddTenantModal: false,
+                showAddExpenseModal: false,
+                showAddPaymentModal: false,
+                newTenant: { room_id: 1, tenant_name: '', phone_number: '', base_rent_applied: 3300 },
+                newExpense: { master_id: 1, expense_name: '', amount: 0, charge_type: 'SHARED', room_id: null },
+                newPayment: { tenant_id: 1, billing_month: '', payment_date: '', amount: 0, payment_mode: 'CASH', payment_type: 'RENT', note: '' },
+
+                get activeTenants() {
+                    return this.tenants.filter(t => t.is_active === 'Y');
+                },
+                get monthOptions() {
+                    const opts = [];
+                    const now = new Date();
+                    for (let i = 11; i >= 0; i--) {
+                        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+                        const value = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+                        const label = d.toLocaleString('en-US', { month: 'long', year: 'numeric' });
+                        opts.push({ value, label });
+                    }
+                    return opts;
+                },
+
+                async initData() {
+                    this.fetchStats();
+                    this.fetchTenants();
+                    this.fetchLedgers();
+                    this.fetchRooms();
+                    this.fetchProperties();
+                    this.fetchExpenses();
+                    this.fetchPayments();
+                    this.fetchDeposits();
+                },
+                async fetchStats() {
+                    const res = await fetch('/api/dashboard/stats');
+                    this.stats = await res.json();
+                },
+                async fetchTenants() {
+                    const res = await fetch('/api/tenants');
+                    this.tenants = await res.json();
+                },
+                async fetchLedgers() {
+                    const res = await fetch('/api/ledgers/current');
+                    this.ledgers = await res.json();
+                },
+                async fetchRooms() {
+                    const res = await fetch('/api/rooms');
+                    this.rooms = await res.json();
+                },
+                async fetchProperties() {
+                    const res = await fetch('/api/properties');
+                    this.properties = await res.json();
+                },
+                async fetchExpenses() {
+                    const res = await fetch('/api/expenses');
+                    this.expenses = await res.json();
+                },
+                async fetchPayments() {
+                    const res = await fetch('/api/payments?billing_month=' + this.paymentsMonth);
+                    this.payments = await res.json();
+                },
+                async fetchDeposits() {
+                    const res = await fetch('/api/deposits');
+                    this.deposits = await res.json();
+                },
+                openAddPaymentModal() {
+                    const now = new Date();
+                    this.newPayment.billing_month = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0');
+                    this.newPayment.payment_date = now.toISOString().slice(0, 10);
+                    if (this.activeTenants.length > 0) {
+                        this.newPayment.tenant_id = this.activeTenants[0].id;
+                    }
+                    this.showAddPaymentModal = true;
+                },
+                async submitPayment() {
+                    await fetch('/api/payments', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(this.newPayment)
+                    });
+                    this.showAddPaymentModal = false;
+                    this.fetchPayments();
+                    this.fetchDeposits();
+                    this.fetchLedgers();
+                },
+                async deletePayment(id) {
+                    if (!confirm('Delete this payment record?')) return;
+                    await fetch('/api/payments/' + id, { method: 'DELETE' });
+                    this.fetchPayments();
+                    this.fetchDeposits();
+                    this.fetchLedgers();
+                },
+                async triggerScraper() {
+                    alert('Triggering Torrent Power Scraper...');
+                    await fetch('/api/operations/run-torrent-scraping', { method: 'POST' });
+                },
+                async triggerGasImport() {
+                    alert('Importing Piped Gas CSV metrics...');
+                    await fetch('/api/operations/import-gas-metrics', { method: 'POST' });
+                    this.fetchLedgers();
+                },
+                async triggerAllocation() {
+                    alert('Allocating tenant bills...');
+                    await fetch('/api/operations/allocate-bills', { method: 'POST' });
+                    this.fetchLedgers();
+                },
+                async submitTenant() {
+                    await fetch('/api/tenants', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(this.newTenant)
+                    });
+                    this.showAddTenantModal = false;
+                    this.fetchTenants();
+                },
+                async submitExpense() {
+                    await fetch('/api/expenses', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(this.newExpense)
+                    });
+                    this.showAddExpenseModal = false;
+                    this.fetchExpenses();
+                }
+            }
+        }
+    </script>
+</body>
+</html>
