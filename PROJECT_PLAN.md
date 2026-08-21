@@ -18,6 +18,17 @@
 | 2026-08-09 | Archived unused/experimental scripts + seed data files to `archive/`; kept only production files in root | commit `f10128c` |
 | 2026-08-09 | Added `.gitignore` (`.env`, `venv/`, `certs/`, `*.log`, `*.csv`, `__pycache__/`); untracked `venv/` (5868 files), CSVs and logs accidentally committed before | commit `f10128c` |
 | 2026-08-09 | **Phase 0.6–0.9 schema hardening**: 17 new indexes, dropped duplicate unique on `utility_metrics.service_number`, added `created_at` to `monthly_ledgers`, added 14 CHECK constraints (non-negative money, `YYYY-MM` month format, `is_active` Y/N); normalized 51 legacy `Jun-26` ledgers → `2026-06`; added input validation to all API create models; schema files regenerated from live DB (identical) | `migrations/001_phase0_schema_hardening.sql` |
+| 2026-08-12 | **Postpaid billing model — torrent engine**: `torrent_automation_engine.py` now stores fetched bills under the CONSUMPTION month (fetch month − 1), and parses/stores torrent `LastBill`/`LastBillAmt`/`LastBilledUnits` (display-only, never used in calcs). Migration `003` adds the three display columns. Pure-function unit tests added (`test_engine_postpaid.py`, 21 passing) that never hit the live API | Phase 6 |
+| 2026-08-12 | **Re-attributed existing fetched bills**: exec `2026-07`→`2026-06`, `2026-08`→`2026-07` (July-fetched = June consumption, Aug-fetched = July consumption); June/July ledgers recompiled in target order; August ledgers removed (no August bill until September's run). Live data snapshots in `backups/` | Phase 6 |
+| 2026-08-12 | **Ledger generation + GUI shifted to billing period**: `allocate_tenant_bills.py` and `import_gas_metrics.py` default to the consumption month; `gui_api.py` `current_billing_period()` drives ledgers/payments/expenses/dashboard defaults; months without a ledger show `Not Billed` | Phase 6 |
+| 2026-08-12 | **Customer View payment dates show month**: `year_ledger` returns payment dates grouped by actual payment month, e.g. `Aug-26(04,11)` | Phase 6 |
+| 2026-08-18 | **WhatsApp reminder templates + manual send + auto sender**: `message_templates` master (active/inactive/default), per-tenant template mapping (`tenant_message_templates`), `whatsapp_send_log` audit; manual wa.me buttons on Customer View + Monthly Ledger view; `send_whatsapp_reminders.py` Playwright auto-sender with persistent session, anti-detection fingerprint, human typing + randomised 60–180s inter-message delays; dashboard trigger + send-log viewer | Phase 7 |
+| 2026-08-19 | **Responsive GUI overhaul**: rebuilt as a single-file Alpine.js + Tailwind app (`static/index.html`); old GUI backed up to `static/index_v1.html`; removed all `sudo` calls from app code; all features re-verified with Playwright at 390px/1440px (no JS errors, no horizontal overflow) | `static/index.html` |
+| 2026-08-19 | **Ledger view enhancements**: `property_id` + `apartment_name` added to `get_ledgers()` (join `property_masters`); search / property filter / sort (outstanding ↑↓, paid ↑↓, address natural sort — G1/G2 before 101/201) applied to mobile cards + desktop table; mobile filter bar stacked full-width; full hisab detail on mobile cards; "Customer" button per row opens that tenant's Customer View; Detailed/Summary toggle | `static/index.html`, `gui_api.py` |
+| 2026-08-19 | **Customer year-ledger header frozen on mobile**: scroll container `max-h-[60vh]` + sticky `thead`/`th` (`border-collapse: separate`), so the month columns stay visible while scrolling on phones | `static/index.html` |
+| 2026-08-20 | **Dashboard vacancy card detail + one-click occupy**: `GET /api/dashboard/vacancy?upcoming_days=120` returns vacant rooms grouped by property (with unit list) + leases expiring in the window (NOT counted as vacant); modal lists vacant units; each unit chip opens the Add-Tenant modal pre-filled with `room_id`, property defaults and lease start = today | `static/index.html`, `gui_api.py` |
+| 2026-08-20 | **Clickable KPI cards + collection progress**: every KPI card opens a detail modal backed by `GET /api/dashboard/kpi` (per-property occupancy/billed/collected/outstanding, tenant directory with active status, per-tenant ledger breakdown); dashboard gains a Collection Progress section (progress bar collected vs total fixed due + Total Fixed Due / Collected / Current Due cards); `stats` now returns `fixed_due_total` (Σ `gross_baki`) and `current_due_total` (Σ positive `new_baki`) | `static/index.html`, `gui_api.py` |
+| 2026-08-20 | **KPI modal semantics split**: Outstanding Dues shows `new_baki` + "Carried fwd vs Current month" split (`prev_baki` vs `new_baki−prev_baki`) + `payment_status` badge; Monthly Rent Billed shows bill composition (Rent/Light/Gas/Maint/Misc → Month Total, sorted by month total desc) — the two cards now show distinct, meaningful detail | `static/index.html`, `gui_api.py` |
 
 ---
 
@@ -113,8 +124,77 @@ Goal: safe, monitored, recoverable system.
 
 ---
 
+## Phase 6 — Postpaid Billing Model
+
+Goal: correctly model torrent/gas bills as POSTPAID — a bill fetched this month represents the PREVIOUS month's consumption. All ingestion, ledger generation, and UI defaults must target the consumption month.
+
+| # | Sub-task | Details | Status |
+|---|---|---|---|
+| 6.1 | Engine stores bill under consumption month | `torrent_automation_engine.py` attributes fetched bills to `execution_month = fetch_month − 1`; stores `LastBill`/`LastBillAmt`/`LastBilledUnits` (display-only) via migration `003_postpaid_bill_metadata.sql`; pure-function units in `test_engine_postpaid.py` (21 passing, no live API) | ✅ Done |
+| 6.2 | Re-attribute existing fetched bills | `2026-07`→`2026-06`, `2026-08`→`2026-07`; June/July ledgers recompiled; live-data snapshots in `backups/` | ✅ Done |
+| 6.3 | Ledger generation defaults to consumption month | `allocate_tenant_bills.py` defaults to previous month (billing period) unless `--month` given; connect/disconnect/package charges still booked on current ledger | ✅ Done |
+| 6.4 | Remove bogus August ledgers | No August bill exists until September's run; August ledgers deleted so they don't show as Unpaid | ✅ Done |
+| 6.5 | Gas import uses consumption month | `import_gas_metrics.py` future imports default to previous month; existing 4 gas bills left at `2026-07` | ✅ Done |
+| 6.6 | GUI + customer view follow billing period | `gui_api.py` `current_billing_period()` drives ledgers/payments/expenses defaults; months w/o ledger show `Not Billed` instead of Unpaid; payment dates grouped per month (e.g. `Aug-26(04,11)`; multiple months joined `Jul-26(12), Aug-26(04)`) | ✅ Done |
+
+---
+
+## Phase 7 — WhatsApp Reminders
+
+Goal: send tenants their hisab as a WhatsApp reminder — manually (zero ban risk, wa.me deep link) and automated (Playwright WhatsApp Web with human-like behaviour). Templates are master-managed with per-tenant overrides and a default-for-all fallback.
+
+| # | Sub-task | Details | Status |
+|---|---|---|---|
+| 7.1 | Template master module | `message_templates` table (name/type/body/note/signature/active/default); single-default enforced via trigger; CRUD API `GET/POST/PUT/DELETE /api/templates`; frontend Templates tab | ✅ Done |
+| 7.2 | Per-tenant template mapping | `tenant_message_templates` mapping table; `PUT /api/templates/mappings/{tenant_id}` (template_id clears); mapping modal in UI; default template used when no mapping | ✅ Done |
+| 7.3 | Hisab message renderer | `whatsapp_message.py` fills placeholders (`{name} {address} {month} {prev_month} {prev_baki} {prev_jama} {bhadu} {light_bill} {gas_bill} {maintenance} {misc} {month_total} {gross_baki} {jama} {jama_date} {new_baki}`) from the ledger; `GET /api/tenants/{id}/whatsapp-message?billing_month=` returns phone + `wa.me` link | ✅ Done |
+| 7.4 | Manual WhatsApp buttons | Customer View header + each Monthly Ledger row opens `https://wa.me/91…?text=<hisab>` prefilled, ready to send — safe, manual | ✅ Done |
+| 7.5 | Automated reminder sender | `send_whatsapp_reminders.py`: persistent Chrome profile (`--login` scans QR once, image served at `/static/whatsapp_qr.png`), anti-detection fingerprint (real UA, no `webdriver`, locale/timezone), character-by-character typing, randomised 60–180s delays between messages, dry-run mode, logs every send to `whatsapp_send_log` | ✅ Done |
+| 7.6 | Dashboard trigger + audit | `POST /api/operations/send-whatsapp-reminders` runs sender in background; `GET /api/whatsapp/send-log` + `/last-batch`; dashboard "Send WhatsApp Reminders" button + Send Log modal; targets active tenants of the billing period with `new_baki > 0` | ✅ Done |
+| 7.7 | One-time WhatsApp Web login | On first auto-send, run `python send_whatsapp_reminders.py --login` under `xvfb-run`, scan QR from `/static/whatsapp_qr.png`; session persists in `whatsapp_profile/` | ✅ Done |
+| 7.8 | Paste-based sending (single message) | `--mode paste` (default) inserts the whole multi-line hisab via real clipboard Ctrl+V — never triggers WhatsApp's Enter auto-send, so one message not per-line; `--mode type` kept as fallback; updated send-button selector for new WhatsApp DOM (`button[aria-label="Send"]`); clears leftover drafts before typing | ✅ Done |
+| 7.9 | Test-number verification mode | `--test-number 919033127964` routes rendered messages to a dummy number; verified NOTIFY/D1/DUE/HISAB delivery, time gaps between messages, and single-message multi-line formatting | ✅ Done |
+
+---
+
+## Phase 8 — Next-Due-Date Reminders (per billing month)
+
+Goal: track the date a tenant promises to clear their due for a **specific billing month**, view it month-wise, and auto-send WhatsApp reminders (set-confirmation, day-before, on-due-date) at an admin-configured master send time.
+
+| # | Sub-task | Details | Status |
+|---|---|---|---|
+| 8.1 | Reminder schema | `tenant_reminders` (tenant_id, billing_month, reminder_date, amount_due, note, status ACTIVE/DONE/CANCELLED/SUPERSEDED, notify/d1/due sent_at stamps) + `reminder_send_log` audit; multiple dates per tenant+month allowed — setting a new date flips older ACTIVE rows to SUPERSEDED; date is scoped to one billing_month only | ✅ Done |
+| 8.2 | Set / reschedule API | `POST /api/reminders` (set, auto-fills amount from month's `new_baki`), `PUT /api/reminders/{id}` (reschedule, keeps one row), `DELETE /api/reminders/{id}`; each set/reschedule queues a NOTIFY message "Your New Next Due Date is : DD-MM-YYYY" + amount | ✅ Done |
+| 8.3 | Month-wise view | `GET /api/reminders?billing_month=` (all rows, ACTIVE first) + `GET /api/reminders/tenants?billing_month=` (eligible tenants with outstanding + current active date); frontend "Due Dates" tab with month selector, status badges, sent-at columns, edit/delete, Send Log modal | ✅ Done |
+| 8.4 | Auto-send sender | `send_due_reminders.py`: sends queued NOTIFY (set confirmation), D1 (day before), DUE (on date short reminder **+ full template hisab message**); stamps sent_at so nothing sends twice; skips a tenant when the month's outstanding is already 0 (paid before due date) | ✅ Done |
+| 8.5 | Master send time (admin-configurable) | `app_settings` table stores `reminder_send_time` (default `10:00`) + `reminder_send_enabled`; `GET/PUT /api/reminders/schedule`; Due Dates tab has an inline time picker + enable toggle + Save | ✅ Done |
+| 8.6 | Daily scheduling | `due_reminder_trigger.py` dispatcher reads the master time from DB and only invokes the Playwright sender inside the 5-minute window; systemd timer `tenant-due-reminders.timer` runs every 5 min (service `tenant-due-reminders.service`); admin changes time/enabled purely from GUI | ✅ Done |
+
+---
+
+## Phase 9 — Executive Dashboard & Ledger UX (GUI overhaul)
+
+Goal: a fast, mobile-first operational UI with an at-a-glance executive dashboard whose KPIs are all drill-down-able, and a fully searchable/filterable/sortable ledger view.
+
+| # | Sub-task | Details | Status |
+|---|---|---|---|
+| 9.1 | Responsive single-file GUI | Rebuilt `static/index.html` as Alpine.js + Tailwind single file; old GUI kept at `static/index_v1.html`; no `sudo` in app code; verified mobile (390px) + desktop (1440px) with Playwright — no JS errors, no horizontal overflow | ✅ Done |
+| 9.2 | Ledger search / filter / sort | `get_ledgers()` returns `property_id`+`apartment_name`; frontend computed search + property filter + sort (outstanding ↑↓, paid ↑↓, address natural sort — `G1/G2` before `101/201`); applied to both mobile cards and desktop table | ✅ Done |
+| 9.3 | Mobile ledger cards | Full hisab shown directly on cards (Prev Net, Rent/Bhadu, Light, Gas, Maint, Misc, Fixed Total Baki, Paid, Current Baki, status, actions); Detailed/Summary toggle; filter bar stacked full-width | ✅ Done |
+| 9.4 | Ledger → Customer View | "Customer" button per ledger row opens that tenant's Customer View; customer year-ledger header frozen on mobile (sticky thead) | ✅ Done |
+| 9.5 | Vacancy card drill-down + occupy | `GET /api/dashboard/vacancy?upcoming_days=120`: vacant grouped by property + lease-expiring upcoming (excluded from vacant count); modal lists units; one-click Occupy pre-fills Add-Tenant modal (room_id, property defaults, lease start today) | ✅ Done |
+| 9.6 | Clickable KPI cards | All 4 stat cards + 3 money-metric cards open detail modals from `GET /api/dashboard/kpi`: properties overview, tenant directory, outstanding dues, rent billed breakdown, collections breakdown, recovery by property | ✅ Done |
+| 9.7 | Collection progress on dashboard | Progress bar + % (collected vs `fixed_due_total`); Total Fixed Due / Collected / Current Due cards; `stats` returns `fixed_due_total` (Σ `gross_baki`) + `current_due_total` (Σ positive `new_baki`) | ✅ Done |
+| 9.8 | Distinct KPI semantics | Outstanding Dues = `new_baki` + carried-fwd/current split + status badge; Monthly Rent Billed = bill composition (Rent/Light/Gas/Maint/Misc → Month Total) — cards no longer show identical data | ✅ Done |
+
+---
+
 ## Current Focus
 
 **Phase 0 (finishing):** item 0.5 only — pipeline scheduling automation (systemd timer). Schema hardening (0.6–0.9) is done.
 **Phase 1 (complete):** all of items 1.1–1.8 are done. Phase 1 is fully delivered.
 **Phase 2 (next):** tenant lifecycle — move-in/move-out workflows (2.1, 2.2), deposit ledger (2.3), vacancy report (2.4), lease expiry alerts (2.5).
+**Phase 6 (complete):** postpaid billing model delivered — engine + gas import both attribute bills to the consumption month, GUI/customer-view follow the billing period, bogus August ledgers removed. Verify at next run (September 2026) that `2026-08` bills arrive and ledger correctly.
+**Phase 7 (delivered, one manual step):** WhatsApp reminders built — templates, mappings, manual buttons and the Playwright auto-sender are live. Before first automated run, complete one-time login: `xvfb-run python send_whatsapp_reminders.py --login`, scan `/static/whatsapp_qr.png`, then the dashboard button sends reminders automatically.
+**Phase 8 (delivered):** per-month next-due-date reminders live — set dates from the Due Dates tab, history per month with supersede, auto-send (NOTIFY / D-1 / DUE+hisab) at the admin-set master time via the 5-minute systemd dispatcher, and no send when the month's balance is already paid. End-to-end verified to the dummy number 919033127964.
+**Phase 9 (delivered):** executive dashboard + ledger UX overhaul complete — all KPIs are drill-down-able, ledger is search/filter/sort-able, vacancy has one-click occupy, and the dashboard shows live collection progress. Verify with real payment data as August 2026 progresses.

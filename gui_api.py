@@ -12,6 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from db_config import get_db_connection
+import whatsapp_message as wm
+import reminder_message as rm
 
 app = FastAPI(title="Tenant Management Admin Core API", version="2.0.0")
 import base64
@@ -20,6 +22,15 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 AUTH_USER = os.getenv("AUTH_USER", "admin")
 AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "")
+
+def current_billing_period():
+    """Postpaid billing period: a bill generated 'this month' is actually the
+    PREVIOUS month's consumption to be collected. Returns 'YYYY-MM' of the
+    consumption (billing) period that the current work should target."""
+    now = datetime.now()
+    if now.month == 1:
+        return f"{now.year - 1}-12"
+    return f"{now.year}-{now.month - 1:02d}"
 
 class BasicAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
@@ -120,7 +131,7 @@ class GasMappingCreate(BaseModel):
 def get_dashboard_stats():
     conn = get_db()
     cur = conn.cursor()
-    execution_month = datetime.now().strftime('%Y-%m')
+    execution_month = current_billing_period()
 
     cur.execute("SELECT COUNT(*) as count FROM rental_core.property_masters;")
     props = cur.fetchone()['count']
@@ -154,6 +165,16 @@ def get_dashboard_stats():
         WHERE billing_month = %s AND month_total > 0;
     """, (execution_month,))
     billed_total = cur.fetchone()['billed_total']
+
+    cur.execute("""
+        SELECT COALESCE(SUM(gross_baki), 0.00) AS fixed_due_total,
+               COALESCE(SUM(CASE WHEN new_baki > 0 THEN new_baki ELSE 0 END), 0.00) AS current_due_total
+        FROM rental_core.monthly_ledgers
+        WHERE billing_month = %s;
+    """, (execution_month,))
+    due_row = cur.fetchone()
+    fixed_due_total = due_row['fixed_due_total']
+    current_due_total = due_row['current_due_total']
 
     cur.execute("""
         SELECT pm.apartment_name,
@@ -193,6 +214,8 @@ def get_dashboard_stats():
         "monthly_collections": float(collections),
         "payment_recovery_pct": recovery_pct,
         "billed_total": float(billed_total),
+        "fixed_due_total": float(fixed_due_total),
+        "current_due_total": float(current_due_total),
         "carried_forward": float(carried_forward),
         "older_outstanding": float(older_outstanding),
         "outstanding_by_property": [
@@ -203,6 +226,229 @@ def get_dashboard_stats():
 
 
 # --- 2. PROPERTY MASTERS & ROOMS ---
+@app.get("/api/dashboard/kpi")
+def get_dashboard_kpi():
+    """Breakdown data for the clickable KPI cards on the executive dashboard."""
+    conn = get_db()
+    cur = conn.cursor()
+    execution_month = current_billing_period()
+
+    cur.execute("""
+        SELECT pm.id AS property_id,
+               pm.apartment_name,
+               pm.default_base_rent,
+               COUNT(r.id) AS total_rooms,
+               COUNT(t.id) AS occupied_rooms,
+               COALESCE(SUM(ml.bhadu_applied), 0.00) AS rent_billed,
+               COALESCE(SUM(ml.jama), 0.00) AS collected,
+               COALESCE(SUM(ml.new_baki), 0.00) AS outstanding
+        FROM rental_core.property_masters pm
+        LEFT JOIN rental_core.rooms r ON r.master_id = pm.id
+        LEFT JOIN rental_core.tenants t ON t.room_id = r.id AND t.is_active = 'Y'
+        LEFT JOIN rental_core.monthly_ledgers ml
+               ON ml.room_id = r.id AND ml.billing_month = %s
+        GROUP BY pm.id, pm.apartment_name, pm.default_base_rent
+        ORDER BY pm.apartment_name ASC;
+    """, (execution_month,))
+    properties = cur.fetchall()
+
+    cur.execute("""
+        SELECT t.id AS tenant_id,
+               t.tenant_name,
+               t.phone_number,
+               t.is_active,
+               r.display_address,
+               pm.apartment_name,
+               t.base_rent_applied,
+               t.security_deposit_applied,
+               COALESCE(ml.jama, 0.00) AS collected,
+               COALESCE(ml.new_baki, 0.00) AS outstanding
+        FROM rental_core.tenants t
+        JOIN rental_core.rooms r ON t.room_id = r.id
+        JOIN rental_core.property_masters pm ON r.master_id = pm.id
+        LEFT JOIN rental_core.monthly_ledgers ml
+               ON ml.tenant_id = t.id AND ml.billing_month = %s
+        ORDER BY t.is_active DESC, pm.apartment_name ASC, r.display_address ASC;
+    """, (execution_month,))
+    tenants = cur.fetchall()
+
+    cur.execute("""
+        SELECT t.id AS tenant_id,
+               t.tenant_name,
+               t.phone_number,
+               r.display_address,
+               pm.apartment_name,
+               ml.gross_baki,
+               ml.jama,
+               ml.new_baki,
+               ml.payment_status,
+               ml.prev_baki,
+               ml.month_total,
+               ml.bhadu_applied,
+               ml.light_bill,
+               ml.gas_bill,
+               ml.maintenance_applied,
+               ml.common_misc_expenses
+        FROM rental_core.monthly_ledgers ml
+        JOIN rental_core.tenants t ON ml.tenant_id = t.id
+        JOIN rental_core.rooms r ON ml.room_id = r.id
+        JOIN rental_core.property_masters pm ON r.master_id = pm.id
+        WHERE ml.billing_month = %s
+        ORDER BY ml.new_baki DESC;
+    """, (execution_month,))
+    ledgers = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    return {
+        "execution_month": execution_month,
+        "properties": [
+            {
+                "property_id": p['property_id'],
+                "apartment_name": p['apartment_name'],
+                "default_base_rent": float(p['default_base_rent'] or 0),
+                "total_rooms": p['total_rooms'],
+                "occupied_rooms": p['occupied_rooms'],
+                "vacant_rooms": p['total_rooms'] - p['occupied_rooms'],
+                "rent_billed": float(p['rent_billed']),
+                "collected": float(p['collected']),
+                "outstanding": float(p['outstanding'])
+            }
+            for p in properties
+        ],
+        "tenants": [
+            {
+                "tenant_id": t['tenant_id'],
+                "tenant_name": t['tenant_name'],
+                "phone_number": t['phone_number'],
+                "is_active": t['is_active'],
+                "display_address": t['display_address'],
+                "apartment_name": t['apartment_name'],
+                "base_rent_applied": float(t['base_rent_applied'] or 0),
+                "security_deposit_applied": float(t['security_deposit_applied'] or 0),
+                "collected": float(t['collected']),
+                "outstanding": float(t['outstanding'])
+            }
+            for t in tenants
+        ],
+        "ledgers": [
+            {
+                "tenant_id": l['tenant_id'],
+                "tenant_name": l['tenant_name'],
+                "phone_number": l['phone_number'],
+                "display_address": l['display_address'],
+                "apartment_name": l['apartment_name'],
+                "gross_baki": float(l['gross_baki']),
+                "jama": float(l['jama']),
+                "new_baki": float(l['new_baki']),
+                "payment_status": l['payment_status'],
+                "prev_baki": float(l['prev_baki']),
+                "month_total": float(l['month_total']),
+                "bhadu_applied": float(l['bhadu_applied']),
+                "light_bill": float(l['light_bill']),
+                "gas_bill": float(l['gas_bill']),
+                "maintenance_applied": float(l['maintenance_applied']),
+                "common_misc_expenses": float(l['common_misc_expenses'])
+            }
+            for l in ledgers
+        ]
+    }
+
+
+@app.get("/api/dashboard/vacancy")
+def get_dashboard_vacancy(upcoming_days: int = Query(120, ge=1)):
+    """Detailed vacancy breakdown for the dashboard vacancy card.
+
+    - vacant: rooms with no active tenant, grouped by property with unit list.
+    - upcoming: rooms whose current active tenant's lease ends within
+      `upcoming_days` days. These are NOT counted as vacant yet.
+    """
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT pm.id AS property_id,
+               pm.apartment_name,
+               r.id AS room_id,
+               r.flat_number,
+               r.display_address
+        FROM rental_core.rooms r
+        JOIN rental_core.property_masters pm ON r.master_id = pm.id
+        WHERE NOT EXISTS (
+            SELECT 1 FROM rental_core.tenants t
+            WHERE t.room_id = r.id AND t.is_active = 'Y'
+        )
+        ORDER BY pm.apartment_name ASC, r.display_address ASC;
+    """)
+    vacant_rows = cur.fetchall()
+
+    cur.execute("""
+        SELECT pm.id AS property_id,
+               pm.apartment_name,
+               r.id AS room_id,
+               r.flat_number,
+               r.display_address,
+               t.tenant_name,
+               t.phone_number,
+               t.lease_end_date
+        FROM rental_core.tenants t
+        JOIN rental_core.rooms r ON t.room_id = r.id
+        JOIN rental_core.property_masters pm ON r.master_id = pm.id
+        WHERE t.is_active = 'Y'
+          AND t.lease_end_date IS NOT NULL
+          AND t.lease_end_date BETWEEN CURRENT_DATE AND (CURRENT_DATE + %s)
+        ORDER BY t.lease_end_date ASC, pm.apartment_name ASC, r.display_address ASC;
+    """, (upcoming_days,))
+    upcoming_rows = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    vacant_by_prop = {}
+    for r in vacant_rows:
+        key = r['property_id']
+        entry = vacant_by_prop.setdefault(key, {
+            "property_id": key,
+            "apartment_name": r['apartment_name'],
+            "vacant_units": 0,
+            "units": []
+        })
+        entry["vacant_units"] += 1
+        entry["units"].append({
+            "room_id": r['room_id'],
+            "flat_number": r['flat_number'],
+            "display_address": r['display_address']
+        })
+
+    upcoming_by_prop = {}
+    for r in upcoming_rows:
+        key = r['property_id']
+        entry = upcoming_by_prop.setdefault(key, {
+            "property_id": key,
+            "apartment_name": r['apartment_name'],
+            "upcoming_units": 0,
+            "units": []
+        })
+        entry["upcoming_units"] += 1
+        entry["units"].append({
+            "room_id": r['room_id'],
+            "flat_number": r['flat_number'],
+            "display_address": r['display_address'],
+            "tenant_name": r['tenant_name'],
+            "phone_number": r['phone_number'],
+            "lease_end_date": str(r['lease_end_date']) if r['lease_end_date'] else None
+        })
+
+    return {
+        "upcoming_days": upcoming_days,
+        "vacant_properties": list(vacant_by_prop.values()),
+        "vacant_count": sum(v["vacant_units"] for v in vacant_by_prop.values()),
+        "upcoming_properties": list(upcoming_by_prop.values()),
+        "upcoming_count": sum(u["upcoming_units"] for u in upcoming_by_prop.values())
+    }
+
+
 @app.get("/api/properties")
 def list_properties():
     conn = get_db()
@@ -399,6 +645,177 @@ def tenant_outstanding(tenant_id: int, billing_month: str = Query(..., pattern=r
         return {"tenant_id": tenant_id, "billing_month": billing_month, "outstanding": 0.0}
     return {"tenant_id": tenant_id, "billing_month": billing_month, "outstanding": float(row['outstanding'])}
 
+
+@app.get("/api/tenants/{tenant_id}/year_ledger")
+def tenant_year_ledger(tenant_id: int, year: int = Query(..., ge=2000, le=2100)):
+    """Full customer view: tenant details + all 12 months for a year, with
+    payment transactions and misc-expense breakdown per month."""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT t.*, r.display_address, r.master_id,
+               pm.apartment_name, pm.plot_number
+        FROM rental_core.tenants t
+        LEFT JOIN rental_core.rooms r ON t.room_id = r.id
+        LEFT JOIN rental_core.property_masters pm ON r.master_id = pm.id
+        WHERE t.id = %s
+    """, (tenant_id,))
+    tenant = cur.fetchone()
+    if tenant is None:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    cur.execute("""
+        SELECT COUNT(*) AS c FROM rental_core.tenants t
+        JOIN rental_core.rooms r ON t.room_id = r.id
+        WHERE r.master_id = %s AND t.is_active = 'Y'
+    """, (tenant['master_id'],))
+    shared_count = cur.fetchone()['c'] or 1
+
+    months = []
+    for m in range(1, 13):
+        bm = f"{year}-{m:02d}"
+        cur.execute("""
+            SELECT * FROM rental_core.monthly_ledgers
+            WHERE tenant_id = %s AND billing_month = %s
+        """, (tenant_id, bm))
+        lrow = cur.fetchone()
+
+        cur.execute("""
+            SELECT id, payment_date, amount, payment_mode, payment_type, note, batch_id
+            FROM rental_core.tenant_payments
+            WHERE tenant_id = %s AND billing_month = %s
+            ORDER BY payment_date, id
+        """, (tenant_id, bm))
+        pay_rows = cur.fetchall()
+        # Group payment days by their actual payment month/year, e.g. "Aug-26(04,11)".
+        _day_groups = []
+        for p in pay_rows:
+            key = p['payment_date'].strftime('%b-%y')
+            if _day_groups and _day_groups[-1][0] == key:
+                _day_groups[-1][1].add(p['payment_date'].strftime('%d'))
+            else:
+                _day_groups.append([key, {p['payment_date'].strftime('%d')}])
+        payment_dates = [f"{g[0]}({','.join(sorted(g[1]))})" for g in _day_groups]
+
+        misc_expenses = []
+        cur.execute("""
+            SELECT tbm.service_number, tbm.amount, tbm.bill_type,
+                   tbm.last_pay_date, tbm.last_bill_date,
+                   tbm.last_bill_amt, tbm.last_billed_units
+            FROM rental_core.torrent_bill_master tbm
+            JOIN rental_core.utility_metrics um ON tbm.service_number = um.service_number
+            WHERE um.room_id = %s AND tbm.execution_month = %s
+            ORDER BY tbm.service_number
+        """, (tenant['room_id'], bm))
+        utility_bills = [
+            {
+                "service_number": u['service_number'],
+                "amount": float(u['amount'] or 0),
+                "bill_type": u['bill_type'],
+                "last_pay_date": str(u['last_pay_date']) if u['last_pay_date'] else None,
+                "last_bill_date": str(u['last_bill_date']) if u['last_bill_date'] else None,
+                "last_bill_amt": float(u['last_bill_amt']) if u['last_bill_amt'] is not None else None,
+                "last_billed_units": float(u['last_billed_units']) if u['last_billed_units'] is not None else None,
+            } for u in cur.fetchall()
+        ]
+
+        cur.execute("""
+            SELECT expense_name, amount, charge_type, room_id
+            FROM rental_core.property_maintenance_expenses
+            WHERE master_id = %s AND execution_month = %s AND charge_type = 'SHARED'
+            ORDER BY id
+        """, (tenant['master_id'], bm))
+        for e in cur.fetchall():
+            misc_expenses.append({
+                "expense_name": e['expense_name'],
+                "amount": float(e['amount']),
+                "charge_type": "SHARED",
+                "tenant_share": round(float(e['amount']) / shared_count, 2),
+                "shared_between": shared_count,
+            })
+        cur.execute("""
+            SELECT expense_name, amount, charge_type, room_id
+            FROM rental_core.property_maintenance_expenses
+            WHERE room_id = %s AND execution_month = %s AND charge_type = 'UNIT'
+            ORDER BY id
+        """, (tenant['room_id'], bm))
+        for e in cur.fetchall():
+            misc_expenses.append({
+                "expense_name": e['expense_name'],
+                "amount": float(e['amount']),
+                "charge_type": "UNIT",
+                "tenant_share": float(e['amount']),
+                "shared_between": 1,
+            })
+
+        base = {
+            "billing_month": bm,
+            "payment_dates": payment_dates,
+            "payments": [
+                {
+                    "id": p['id'],
+                    "payment_date": str(p['payment_date']),
+                    "amount": float(p['amount']),
+                    "payment_mode": p['payment_mode'],
+                    "payment_type": p['payment_type'],
+                    "note": p['note'],
+                    "batch_id": p['batch_id'],
+                } for p in pay_rows
+            ],
+            "misc_expenses": misc_expenses,
+            "utility_bills": utility_bills,
+        }
+        if lrow:
+            base.update({
+                "prev_baki": float(lrow['prev_baki'] or 0),
+                "prev_jama": float(lrow['prev_jama'] or 0),
+                "bhadu_applied": float(lrow['bhadu_applied'] or 0),
+                "light_bill": float(lrow['light_bill'] or 0),
+                "gas_bill": float(lrow['gas_bill'] or 0),
+                "maintenance_applied": float(lrow['maintenance_applied'] or 0),
+                "common_misc_expenses": float(lrow['common_misc_expenses'] or 0),
+                "month_total": float(lrow['month_total'] or 0),
+                "gross_baki": float(lrow['gross_baki'] or 0),
+                "jama": float(lrow['jama'] or 0),
+                "new_baki": float(lrow['new_baki'] or 0),
+                "payment_status": lrow['payment_status'],
+                "jama_date": lrow['jama_date'],
+                "light_bill_type": lrow['light_bill_type'],
+            })
+        else:
+            base.update({
+                "prev_baki": 0.0, "prev_jama": 0.0, "bhadu_applied": 0.0,
+                "light_bill": 0.0, "gas_bill": 0.0, "maintenance_applied": 0.0,
+                "common_misc_expenses": 0.0, "month_total": 0.0, "gross_baki": 0.0,
+                "jama": 0.0, "new_baki": 0.0, "payment_status": "Not Billed",
+                "jama_date": '0', "light_bill_type": 'NORMAL',
+            })
+        months.append(base)
+
+    cur.close()
+    conn.close()
+    return {
+        "tenant": {
+            "id": tenant['id'],
+            "tenant_name": tenant['tenant_name'],
+            "phone_number": tenant['phone_number'],
+            "is_active": str(tenant['is_active']) if tenant['is_active'] else None,
+            "base_rent_applied": float(tenant['base_rent_applied'] or 0),
+            "maintenance_applied": float(tenant['maintenance_applied'] or 0),
+            "security_deposit_applied": float(tenant['security_deposit_applied'] or 0),
+            "lease_start_date": str(tenant['lease_start_date']) if tenant['lease_start_date'] else None,
+            "lease_end_date": str(tenant['lease_end_date']) if tenant['lease_end_date'] else None,
+            "room_id": tenant['room_id'],
+            "display_address": tenant['display_address'],
+            "apartment_name": tenant['apartment_name'],
+            "plot_number": tenant['plot_number'],
+        },
+        "year": year,
+        "months": months,
+    }
+
 @app.post("/api/tenants")
 def create_tenant(tenant: TenantCreate):
     conn = get_db()
@@ -458,7 +875,7 @@ def expense_monthly_totals():
 @app.get("/api/expenses")
 def list_expenses(execution_month: str = None):
     if not execution_month:
-        execution_month = datetime.now().strftime('%Y-%m')
+        execution_month = current_billing_period()
     conn = get_db()
     cur = conn.cursor()
     cur.execute("""
@@ -476,7 +893,7 @@ def list_expenses(execution_month: str = None):
 
 @app.post("/api/expenses")
 def add_expense(expense: MaintenanceExpenseCreate):
-    execution_month = datetime.now().strftime('%Y-%m')
+    execution_month = current_billing_period()
     conn = get_db()
     cur = conn.cursor()
     try:
@@ -612,7 +1029,7 @@ def list_ledger_months():
 @app.get("/api/ledgers/current")
 def get_ledgers(billing_month: str = None):
     if not billing_month:
-        billing_month = datetime.now().strftime('%Y-%m')
+        billing_month = current_billing_period()
     conn = get_db()
     cur = conn.cursor()
     cur.execute("""
@@ -636,10 +1053,13 @@ def get_ledgers(billing_month: str = None):
             ml.month_total,
             ml.gross_baki,
             r.display_address,
+            pm.id AS property_id,
+            pm.apartment_name,
             t.tenant_name,
             t.phone_number
         FROM rental_core.monthly_ledgers ml
         LEFT JOIN rental_core.rooms r ON ml.room_id = r.id
+        LEFT JOIN rental_core.property_masters pm ON r.master_id = pm.id
         LEFT JOIN rental_core.tenants t ON ml.tenant_id = t.id
         WHERE ml.billing_month = %s
         ORDER BY r.display_address ASC;
@@ -651,6 +1071,16 @@ def get_ledgers(billing_month: str = None):
 
 
 # --- 6b. TENANT PAYMENTS (rent + deposit) ---
+
+def _split_carry(nb):
+    """Split a carried-forward net balance into non-negative (prev_baki,
+    prev_jama) parts. Positive carry (debt) -> prev_baki, negative carry
+    (overpayment/credit) -> prev_jama."""
+    nb = float(nb)
+    if nb >= 0:
+        return nb, 0.00
+    return 0.00, -nb
+
 
 def _sync_ledger_jama(cur, tenant_id, billing_month):
     cur.execute("""
@@ -664,19 +1094,23 @@ def _sync_ledger_jama(cur, tenant_id, billing_month):
 
     if total_paid > 0:
         # Ensure a ledger row exists so advance payments aren't lost before the
-        # month is compiled: carry forward prior month balance as prev_baki.
+        # month is compiled: carry forward prior month balance as prev_baki
+        # (or overpayment as prev_jama credit).
+        cur.execute("""
+            SELECT COALESCE((SELECT new_baki FROM rental_core.monthly_ledgers
+                             WHERE tenant_id = %s AND billing_month < %s
+                             ORDER BY billing_month DESC LIMIT 1), 0.00) AS prev_nb
+        """, (tenant_id, billing_month))
+        prev_nb = float(cur.fetchone()['prev_nb'])
+        carry_baki, carry_jama = _split_carry(prev_nb)
         cur.execute("""
             INSERT INTO rental_core.monthly_ledgers
                 (room_id, tenant_id, billing_month, prev_baki, prev_jama, bhadu_applied,
                  light_bill, gas_bill, maintenance_applied, common_misc_expenses)
-            SELECT t.room_id, t.id, %s,
-                   COALESCE((SELECT new_baki FROM rental_core.monthly_ledgers
-                             WHERE tenant_id = t.id AND billing_month < %s
-                             ORDER BY billing_month DESC LIMIT 1), 0.00),
-                   0.00, 0.00, 0.00, 0.00, 0.00, 0.00
+            SELECT t.room_id, t.id, %s, %s, %s, 0.00, 0.00, 0.00, 0.00, 0.00
             FROM rental_core.tenants t WHERE t.id = %s
             ON CONFLICT (tenant_id, billing_month) DO NOTHING
-        """, (billing_month, billing_month, tenant_id))
+        """, (billing_month, carry_baki, carry_jama, tenant_id))
 
     cur.execute("""
         UPDATE rental_core.monthly_ledgers
@@ -728,27 +1162,24 @@ def _cascade_ledger_chain(cur, tenant_id, from_month):
     base = cur.fetchone()
     if base is None:
         return
-    next_prev_baki = float(base['new_baki'])
-    next_prev_jama = float(base['prev_jama'])
+    next_prev_baki, next_prev_jama = _split_carry(float(base['new_baki']))
 
     for bm in months:
         cur.execute("""
             UPDATE rental_core.monthly_ledgers
             SET prev_baki = %s, prev_jama = %s
             WHERE tenant_id = %s AND billing_month = %s
-            RETURNING COALESCE(new_baki, 0.00) AS new_baki,
-                      COALESCE(prev_jama, 0.00) AS prev_jama
+            RETURNING COALESCE(new_baki, 0.00) AS new_baki
         """, (next_prev_baki, next_prev_jama, tenant_id, bm))
         row = cur.fetchone()
         if row:
-            next_prev_baki = float(row['new_baki'])
-            next_prev_jama = float(row['prev_jama'])
+            next_prev_baki, next_prev_jama = _split_carry(float(row['new_baki']))
 
 
 @app.get("/api/payments")
 def list_payments(billing_month: str = None):
     if not billing_month:
-        billing_month = datetime.now().strftime('%Y-%m')
+        billing_month = current_billing_period()
     conn = get_db()
     cur = conn.cursor()
     cur.execute("""
@@ -1012,6 +1443,13 @@ def serve_gui():
         return FileResponse("static/index.html")
     raise HTTPException(status_code=404, detail="Frontend static/index.html not found.")
 
+@app.get("/index_v1", response_class=FileResponse)
+def serve_gui_v1():
+    """Legacy GUI backup (pre-responsive). Also reachable at /static/index_v1.html."""
+    if os.path.exists("static/index_v1.html"):
+        return FileResponse("static/index_v1.html")
+    raise HTTPException(status_code=404, detail="Legacy GUI static/index_v1.html not found.")
+
 
 
 class TenantUpdate(BaseModel):
@@ -1082,3 +1520,531 @@ def trigger_gas_import():
         return {"status": "SUCCESS", "message": "Piped gas metrics imported from CSV successfully."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# --- 9. WHATSAPP MESSAGE TEMPLATES ---
+
+class TemplateCreate(BaseModel):
+    template_name: str
+    template_type: Optional[str] = Field(default="REMINDER")
+    body: str
+    note: Optional[str] = ""
+    signature: Optional[str] = ""
+    is_active: Optional[str] = Field(default="Y", pattern="^[YN]$")
+    is_default: Optional[str] = Field(default="N", pattern="^[YN]$")
+
+
+class TemplateUpdate(BaseModel):
+    template_name: Optional[str] = None
+    template_type: Optional[str] = None
+    body: Optional[str] = None
+    note: Optional[str] = None
+    signature: Optional[str] = None
+    is_active: Optional[str] = Field(default=None, pattern="^[YN]$")
+    is_default: Optional[str] = Field(default=None, pattern="^[YN]$")
+
+
+@app.get("/api/templates")
+def list_templates():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT t.*, COUNT(m.tenant_id) AS mapped_tenants
+        FROM rental_core.message_templates t
+        LEFT JOIN rental_core.tenant_message_templates m ON t.id = m.template_id
+        GROUP BY t.id
+        ORDER BY t.is_default DESC, t.id DESC;
+    """)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+@app.post("/api/templates")
+def create_template(tpl: TemplateCreate):
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO rental_core.message_templates
+            (template_name, template_type, body, note, signature, is_active, is_default)
+            VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id;
+        """, (tpl.template_name, tpl.template_type, tpl.body,
+              tpl.note or "", tpl.signature or "", tpl.is_active, tpl.is_default))
+        new_id = cur.fetchone()['id']
+        conn.commit()
+        return {"status": "SUCCESS", "template_id": new_id}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.put("/api/templates/{template_id}")
+def update_template(template_id: int, data: TemplateUpdate):
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        fields, params = [], []
+        for col in ["template_name", "template_type", "body", "note", "signature",
+                    "is_active", "is_default"]:
+            val = getattr(data, col, None)
+            if val is not None:
+                fields.append(f"{col} = %s")
+                params.append(val)
+        if not fields:
+            raise HTTPException(status_code=400, detail="No fields to update")
+        params.append(template_id)
+        cur.execute(f"UPDATE rental_core.message_templates SET {', '.join(fields)} WHERE id = %s;", params)
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Template not found")
+        conn.commit()
+        return {"status": "SUCCESS", "message": f"Template #{template_id} updated."}
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.delete("/api/templates/{template_id}")
+def delete_template(template_id: int):
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM rental_core.message_templates WHERE id = %s;", (template_id,))
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Template not found")
+        conn.commit()
+        return {"status": "SUCCESS", "message": f"Template #{template_id} deleted."}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        cur.close()
+        conn.close()
+
+
+# --- 9b. PER-TENANT TEMPLATE MAPPING ---
+
+@app.get("/api/templates/mappings")
+def list_template_mappings():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT m.tenant_id, m.template_id, m.created_at,
+               t.tenant_name, r.display_address, tpl.template_name
+        FROM rental_core.tenant_message_templates m
+        JOIN rental_core.tenants t ON m.tenant_id = t.id
+        LEFT JOIN rental_core.rooms r ON t.room_id = r.id
+        LEFT JOIN rental_core.message_templates tpl ON m.template_id = tpl.id
+        ORDER BY r.display_address;
+    """)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+@app.put("/api/templates/mappings/{tenant_id}")
+def set_tenant_template(tenant_id: int, template_id: int = Query(None)):
+    """Map a template to a tenant (template_id=0 or missing clears mapping)."""
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT id FROM rental_core.tenants WHERE id = %s;", (tenant_id,))
+        if cur.fetchone() is None:
+            raise HTTPException(status_code=404, detail="Tenant not found")
+        if template_id and template_id > 0:
+            cur.execute("SELECT id FROM rental_core.message_templates WHERE id = %s;", (template_id,))
+            if cur.fetchone() is None:
+                raise HTTPException(status_code=404, detail="Template not found")
+            cur.execute("""
+                INSERT INTO rental_core.tenant_message_templates (tenant_id, template_id)
+                VALUES (%s, %s)
+                ON CONFLICT (tenant_id) DO UPDATE SET template_id = EXCLUDED.template_id
+            """, (tenant_id, template_id))
+        else:
+            cur.execute("DELETE FROM rental_core.tenant_message_templates WHERE tenant_id = %s;", (tenant_id,))
+        conn.commit()
+        return {"status": "SUCCESS", "tenant_id": tenant_id, "template_id": template_id}
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        cur.close()
+        conn.close()
+
+
+# --- 9c. WHATSAPP MESSAGE RENDER / SEND ---
+
+@app.get("/api/tenants/{tenant_id}/whatsapp-message")
+def tenant_whatsapp_message(tenant_id: int, billing_month: str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$")):
+    """Render the reminder message for a tenant+month and return phone + wa.me link."""
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        payload = wm.message_payload(cur, tenant_id, billing_month)
+        return payload
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.post("/api/operations/send-whatsapp-reminders")
+def trigger_whatsapp_reminders(background_tasks: BackgroundTasks):
+    """Runs the automated WhatsApp reminder sender as a background task."""
+    def run_sender():
+        subprocess.run([sys.executable, "send_whatsapp_reminders.py"], check=False)
+
+    background_tasks.add_task(run_sender)
+    return {"status": "QUEUED", "message": "WhatsApp reminder sender triggered in background."}
+
+
+@app.get("/api/whatsapp/send-log")
+def get_whatsapp_send_log(limit: int = Query(200, ge=1, le=2000), batch_id: str = None):
+    conn = get_db()
+    cur = conn.cursor()
+    if batch_id:
+        cur.execute("""
+            SELECT * FROM rental_core.whatsapp_send_log
+            WHERE batch_id = %s ORDER BY id DESC LIMIT %s;
+        """, (batch_id, limit))
+    else:
+        cur.execute("""
+            SELECT * FROM rental_core.whatsapp_send_log
+            ORDER BY id DESC LIMIT %s;
+        """, (limit,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+@app.get("/api/whatsapp/last-batch")
+def get_whatsapp_last_batch():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT batch_id, MAX(created_at) AS started_at,
+               COUNT(*) FILTER (WHERE status = 'SENT') AS sent,
+               COUNT(*) FILTER (WHERE status = 'FAILED') AS failed,
+               COUNT(*) FILTER (WHERE status = 'SKIPPED') AS skipped,
+               COUNT(*) AS total
+        FROM rental_core.whatsapp_send_log
+        GROUP BY batch_id ORDER BY MAX(created_at) DESC LIMIT 1;
+    """)
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row or {"batch_id": None, "total": 0}
+
+
+@app.get("/api/whatsapp/qr")
+def get_whatsapp_qr(clean: bool = Query(False)):
+    """Serve the current WhatsApp Web login QR image with no-cache headers so
+    the browser always fetches the freshest frame (the QR rotates every ~20s).
+    clean=true -> QR only (with quiet-zone padding), otherwise the full page."""
+    import os as _os
+    path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                         "static", "whatsapp_qr_clean.png" if clean else "whatsapp_qr.png")
+    if not _os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Run --login first to generate the QR image")
+    from fastapi.responses import Response
+    with open(path, "rb") as f:
+        data = f.read()
+    return Response(content=data, media_type="image/png",
+                    headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"})
+
+
+# --- 9e. NEXT-DUE-DATE REMINDERS (per billing month) ---
+
+class ReminderSet(BaseModel):
+    tenant_id: int
+    billing_month: str = Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
+    reminder_date: str  # YYYY-MM-DD
+    amount_due: Optional[float] = Field(default=None, ge=0)
+    note: Optional[str] = None
+
+
+class ReminderSchedule(BaseModel):
+    send_time: str = Field(default="10:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    enabled: Optional[bool] = True
+
+
+@app.get("/api/reminders/schedule")
+def get_reminder_schedule():
+    """Admin-set master auto-send time + enabled flag."""
+    return {
+        "send_time": rm.send_time_setting(),
+        "enabled": rm.sends_enabled(),
+    }
+
+
+@app.put("/api/reminders/schedule")
+def set_reminder_schedule(data: ReminderSchedule):
+    """Persist the admin-set master send time + enabled flag. The systemd
+    sender timer is rescheduled by the daily 00:00 sync service
+    (tenant-due-reminders-sync) — no privileged action happens from the GUI."""
+    rm.set_setting("reminder_send_time", data.send_time)
+    rm.set_setting("reminder_send_enabled", "Y" if data.enabled else "N")
+    return {
+        "status": "SUCCESS",
+        "send_time": data.send_time,
+        "enabled": data.enabled,
+    }
+
+
+@app.get("/api/reminders")
+def list_reminders(billing_month: str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$")):
+    """Month-wise reminder view: every reminder row for a billing month, with
+    the ACTIVE (live) reminder for each tenant flagged first."""
+    rows = rm.month_reminders(billing_month)
+    return rows
+
+
+@app.get("/api/reminders/tenants")
+def reminders_tenants(billing_month: str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$")):
+    """Active tenants with an outstanding balance for `billing_month`, plus the
+    currently ACTIVE reminder date (if any). Used by the "set reminder" form."""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT DISTINCT t.id, t.tenant_name, t.phone_number, r.display_address,
+               ml.new_baki,
+               ar.reminder_date AS active_reminder_date,
+               ar.id AS active_reminder_id
+        FROM rental_core.monthly_ledgers ml
+        JOIN rental_core.tenants t ON ml.tenant_id = t.id
+        LEFT JOIN rental_core.rooms r ON t.room_id = r.id
+        LEFT JOIN rental_core.tenant_reminders ar
+               ON ar.tenant_id = t.id AND ar.billing_month = %s AND ar.status = 'ACTIVE'
+        WHERE ml.billing_month = %s AND t.is_active = 'Y'
+          AND COALESCE(ml.new_baki, 0.00) > 0
+        ORDER BY r.display_address, t.tenant_name;
+    """, (billing_month, billing_month))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+@app.post("/api/reminders")
+def set_reminder(data: ReminderSet):
+    """Set/update a tenant's next due date for one billing month.
+
+    Multiple dates per tenant+month are allowed (history kept): the newest row
+    becomes ACTIVE and any earlier ACTIVE rows for the same tenant+month are
+    flipped to SUPERSEDED. A NOTIFY message ("Your New Next Due Date is : ...")
+    is queued so the sender dispatches it on its next run.
+    """
+    from datetime import datetime as _dt
+    try:
+        reminder_date = _dt.strptime(data.reminder_date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="reminder_date must be YYYY-MM-DD")
+
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT id FROM rental_core.tenants WHERE id = %s;", (data.tenant_id,))
+        if cur.fetchone() is None:
+            raise HTTPException(status_code=404, detail="Tenant not found")
+
+        if data.amount_due is None:
+            cur.execute("""
+                SELECT new_baki FROM rental_core.monthly_ledgers
+                WHERE tenant_id = %s AND billing_month = %s
+            """, (data.tenant_id, data.billing_month))
+            row = cur.fetchone()
+            amount_due = row['new_baki'] if row else 0.0
+        else:
+            amount_due = data.amount_due
+
+        # supersede previous ACTIVE reminders for the same tenant+month
+        cur.execute("""
+            UPDATE rental_core.tenant_reminders
+               SET status = 'SUPERSEDED', updated_at = now()
+             WHERE tenant_id = %s AND billing_month = %s AND status = 'ACTIVE'
+        """, (data.tenant_id, data.billing_month))
+
+        cur.execute("""
+            INSERT INTO rental_core.tenant_reminders
+            (tenant_id, billing_month, reminder_date, amount_due, note)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING *
+        """, (data.tenant_id, data.billing_month, reminder_date, amount_due, data.note or ""))
+        reminder = cur.fetchone()
+
+        # queue NOTIFY message
+        payload = rm.reminder_payload(cur, reminder)
+        cur.execute("""
+            INSERT INTO rental_core.reminder_send_log
+            (batch_id, reminder_id, tenant_id, phone_number, send_type,
+             message, status)
+            VALUES (%s, %s, %s, %s, %s, %s, 'QUEUED')
+        """, (datetime.now().strftime("%Y%m%d%H%M%S") + "_set",
+              reminder['id'], reminder['tenant_id'], payload['phone_number'],
+              'NOTIFY', payload['notify']))
+        conn.commit()
+        return {
+            "status": "SUCCESS",
+            "reminder": reminder,
+            "message": payload["notify"],
+            "wa_link": payload["wa_link"],
+            "notify_queued": True,
+        }
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.put("/api/reminders/{reminder_id}")
+def update_reminder(reminder_id: int, data: ReminderSet):
+    """Edit the date/amount of an existing reminder (keeps one row)."""
+    from datetime import datetime as _dt
+    try:
+        reminder_date = _dt.strptime(data.reminder_date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="reminder_date must be YYYY-MM-DD")
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            UPDATE rental_core.tenant_reminders
+               SET reminder_date = %s, amount_due = %s, note = %s,
+                   status = 'ACTIVE', updated_at = now()
+             WHERE id = %s
+             RETURNING *
+        """, (reminder_date, data.amount_due, data.note or "", reminder_id))
+        reminder = cur.fetchone()
+        if reminder is None:
+            raise HTTPException(status_code=404, detail="Reminder not found")
+        # supersede any OTHER active reminders for the same tenant+month
+        cur.execute("""
+            UPDATE rental_core.tenant_reminders
+               SET status = 'SUPERSEDED', updated_at = now()
+             WHERE tenant_id = %s AND billing_month = %s AND status = 'ACTIVE'
+               AND id <> %s
+        """, (reminder['tenant_id'], reminder['billing_month'], reminder_id))
+        payload = rm.reminder_payload(cur, reminder)
+        cur.execute("""
+            INSERT INTO rental_core.reminder_send_log
+            (batch_id, reminder_id, tenant_id, phone_number, send_type,
+             message, status)
+            VALUES (%s, %s, %s, %s, %s, %s, 'QUEUED')
+        """, (datetime.now().strftime("%Y%m%d%H%M%S") + "_set",
+              reminder['id'], reminder['tenant_id'], payload['phone_number'],
+              'NOTIFY', payload['notify']))
+        conn.commit()
+        return {
+            "status": "SUCCESS",
+            "reminder": reminder,
+            "message": payload["notify"],
+            "wa_link": payload["wa_link"],
+            "notify_queued": True,
+        }
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.delete("/api/reminders/{reminder_id}")
+def delete_reminder(reminder_id: int):
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM rental_core.tenant_reminders WHERE id = %s RETURNING id;",
+                    (reminder_id,))
+        if cur.fetchone() is None:
+            raise HTTPException(status_code=404, detail="Reminder not found")
+        conn.commit()
+        return {"status": "SUCCESS", "deleted_id": reminder_id}
+    except HTTPException:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+
+@app.post("/api/operations/send-due-reminders")
+def trigger_due_reminders(background_tasks: BackgroundTasks):
+    """Runs the automated next-due-date reminder sender as a background task."""
+    def run_sender():
+        subprocess.run([sys.executable, "send_due_reminders.py"], check=False)
+
+    background_tasks.add_task(run_sender)
+    return {"status": "QUEUED", "message": "Next-due-date reminder sender triggered in background."}
+
+
+@app.get("/api/reminders/send-log")
+def get_reminder_send_log(limit: int = Query(200, ge=1, le=2000), batch_id: str = None):
+    conn = get_db()
+    cur = conn.cursor()
+    if batch_id:
+        cur.execute("""
+            SELECT l.*, t.tenant_name, r.display_address
+            FROM rental_core.reminder_send_log l
+            LEFT JOIN rental_core.tenants t ON l.tenant_id = t.id
+            LEFT JOIN rental_core.rooms r ON t.room_id = r.id
+            WHERE l.batch_id = %s ORDER BY l.id DESC LIMIT %s;
+        """, (batch_id, limit))
+    else:
+        cur.execute("""
+            SELECT l.*, t.tenant_name, r.display_address
+            FROM rental_core.reminder_send_log l
+            LEFT JOIN rental_core.tenants t ON l.tenant_id = t.id
+            LEFT JOIN rental_core.rooms r ON t.room_id = r.id
+            ORDER BY l.id DESC LIMIT %s;
+        """, (limit,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+@app.get("/api/reminders/last-batch")
+def get_reminder_last_batch():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT batch_id, MAX(created_at) AS started_at,
+               COUNT(*) FILTER (WHERE status = 'SENT') AS sent,
+               COUNT(*) FILTER (WHERE status = 'FAILED') AS failed,
+               COUNT(*) FILTER (WHERE status = 'SKIPPED') AS skipped,
+               COUNT(*) FILTER (WHERE status = 'QUEUED') AS queued,
+               COUNT(*) AS total
+        FROM rental_core.reminder_send_log
+        GROUP BY batch_id ORDER BY MAX(created_at) DESC LIMIT 1;
+    """)
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row or {"batch_id": None, "total": 0}

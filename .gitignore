@@ -12,5 +12,12 @@ certs/
 # Runtime logs & artifacts
 *.log
 
+# WhatsApp Web browser session profile (contains linked-device session)
+whatsapp_profile/
+
+# WhatsApp QR login screenshots (runtime artifacts from --login)
+static/whatsapp_qr.png
+static/whatsapp_qr_clean.png
+
 # Data files (secret tokens, feeds, generated exports)
 *.csv

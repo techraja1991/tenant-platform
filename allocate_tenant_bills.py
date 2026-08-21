@@ -1,15 +1,29 @@
 import csv
 import json
+import sys
 from datetime import datetime, timedelta
+from decimal import Decimal as _Dec
 from db_config import get_db_connection
 
-# Get current billing month in YYYY-MM format
-billing_month = datetime.now().strftime('%Y-%m')
-billing_month_display = datetime.now().strftime('%b-%y')
+
+# Get billing month in YYYY-MM format (override with --month YYYY-MM).
+# Postpaid billing: a bill generated "this month" is actually the PREVIOUS
+# month's consumption to be collected, so default to the consumption month
+# (previous calendar month) unless explicitly overridden.
+def _consumption_month():
+    now = datetime.now()
+    if now.month == 1:
+        return f"{now.year - 1}-12"
+    return f"{now.year}-{now.month - 1:02d}"
+
+billing_month = _consumption_month()
+if "--month" in sys.argv:
+    billing_month = sys.argv[sys.argv.index("--month") + 1]
+billing_month_display = billing_month
 
 # Calculate the previous month string for rolling over debt (prev_baki)
-prev_month_dt = datetime.now().replace(day=1) - timedelta(days=1)
-prev_billing_month = prev_month_dt.strftime('%Y-%m')
+_bm_dt = datetime.strptime(billing_month, '%Y-%m')
+prev_billing_month = (_bm_dt.replace(day=1) - timedelta(days=1)).strftime('%Y-%m')
 
 # Output CSV file
 output_csv = f"tenant_bills_{billing_month}.csv"
@@ -118,8 +132,13 @@ try:
                 (tenant_pk, prev_billing_month)
             )
             row = cursor.fetchone()
-            prev_baki = row[0] if row else 0.00
-            prev_jama = row[1] if row else 0.00
+            prev_nb = float(row[0]) if row else 0.00
+            if prev_nb >= 0:
+                prev_baki = _Dec(prev_nb)
+                prev_jama = _Dec(0.00)
+            else:
+                prev_baki = _Dec(0.00)
+                prev_jama = _Dec(-prev_nb)
 
             # 3b. Get current month's payment (jama) for accurate new_baki on re-runs
             cursor.execute(

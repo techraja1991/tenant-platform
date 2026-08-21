@@ -43,10 +43,58 @@ def determine_bill_type(last_pay_str):
                            if start_of_this_month.month > 1 else start_of_this_month.replace(year=start_of_this_month.year-1, month=12))
     return "NOTICE" if pay_date < start_of_last_month else "NORMAL"
 
+def parse_ms_date(value):
+    """Parses the .NET /Date(ms)/ format used by torrent get_amount fields."""
+    if not value:
+        return None
+    match = re.search(r'/Date\((\d+)\)/', str(value))
+    if not match:
+        return None
+    return datetime.fromtimestamp(int(match.group(1)) / 1000.0)
+
+def compute_consumption_month(fetch_date):
+    """Postpaid billing: a bill fetched in month M is the PREVIOUS month's
+    consumption bill. Returns the consumption month as 'YYYY-MM'."""
+    year, month = fetch_date.year, fetch_date.month
+    if month == 1:
+        year -= 1
+        month = 12
+    else:
+        month -= 1
+    return f"{year}-{month:02d}"
+
+def parse_get_amount_response(data, fetch_date=None):
+    """Extracts bill fields from the torrent get_amount 'd' payload.
+
+    execution_month is set to the CONSUMPTION month (fetch month - 1) because
+    torrent bills are postpaid. last_bill_amt / last_billed_units / last_bill_date
+    are stored for DISPLAY ONLY and must never be used in any calculation."""
+    if fetch_date is None:
+        fetch_date = datetime.now()
+    amt = data.get("OsAmt")
+    partner = data.get("Partner")
+    last_pay = data.get("LastPay")
+    bill_type = determine_bill_type(last_pay)
+
+    last_bill_date = parse_ms_date(data.get("LastBill"))
+    last_bill_amt = data.get("LastBillAmt")
+    last_billed_units = data.get("LastBilledUnits")
+
+    return {
+        "amount": amt,
+        "partner": partner,
+        "bill_type": bill_type,
+        "last_pay_date": parse_ms_date(last_pay),
+        "last_bill_date": last_bill_date,
+        "last_bill_amt": last_bill_amt,
+        "last_billed_units": last_billed_units,
+        "execution_month": compute_consumption_month(fetch_date),
+    }
+
 def run_multi_account_pipeline():
     conn = get_db_connection()
     cur = conn.cursor()
-    execution_month = datetime.now().strftime('%Y-%m')
+    execution_month = compute_consumption_month(datetime.now())
     
     with open('monthly_results.csv', 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
@@ -82,33 +130,38 @@ def run_multi_account_pipeline():
                     resp = engine.get_amount(encrypted_value)
                     data = resp.get("d", {})
                     
-                    amt = data.get("OsAmt")
-                    partner = data.get("Partner")
-                    last_pay = data.get("LastPay")
-                    bill_type = determine_bill_type(last_pay)
-                    
-                    pay_date = None
-                    if last_pay:
-                        match = re.search(r'/Date\((\d+)\)/', last_pay)
-                        if match:
-                            pay_date = datetime.fromtimestamp(int(match.group(1)) / 1000.0)
+                    parsed = parse_get_amount_response(data)
+                    amt = parsed["amount"]
+                    partner = parsed["partner"]
+                    bill_type = parsed["bill_type"]
+                    pay_date = parsed["last_pay_date"]
+                    last_bill_date = parsed["last_bill_date"]
+                    last_bill_amt = parsed["last_bill_amt"]
+                    last_billed_units = parsed["last_billed_units"]
 
-                    print(f"Service: {service}, Amount: {amt}, Partner: {partner}, Type: {bill_type}, Last Payment: {pay_date}")
+                    print(f"Service: {service}, Amount: {amt}, Partner: {partner}, Type: {bill_type}, "
+                          f"Last Payment: {pay_date}, LastBillDate: {last_bill_date}, "
+                          f"LastBillAmt: {last_bill_amt}, LastBilledUnits: {last_billed_units}")
                     
                     # 2. Database Upsert Engine (Updates if service_number + execution_month combination already exists)
                     cur.execute("""
                         INSERT INTO rental_core.torrent_bill_master 
-                            (service_number, amount, partner_name, bill_type, last_pay_date, execution_month, created_at)
+                            (service_number, amount, partner_name, bill_type, last_pay_date,
+                             last_bill_date, last_bill_amt, last_billed_units, execution_month, created_at)
                         VALUES 
-                            (%s, %s, %s, %s, %s, %s, NOW())
+                            (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                         ON CONFLICT (service_number, execution_month) 
                         DO UPDATE SET 
                             amount = EXCLUDED.amount,
                             partner_name = EXCLUDED.partner_name,
                             bill_type = EXCLUDED.bill_type,
                             last_pay_date = EXCLUDED.last_pay_date,
+                            last_bill_date = EXCLUDED.last_bill_date,
+                            last_bill_amt = EXCLUDED.last_bill_amt,
+                            last_billed_units = EXCLUDED.last_billed_units,
                             created_at = NOW()
-                    """, (service, amt, partner, bill_type, pay_date, execution_month))
+                    """, (service, amt, partner, bill_type, pay_date,
+                          last_bill_date, last_bill_amt, last_billed_units, execution_month))
                     
                     writer.writerow([service, partner, amt, bill_type])
                     

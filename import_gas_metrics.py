@@ -43,7 +43,10 @@ def process_gas_pipeline():
     conn = get_db_connection()
     cur = conn.cursor()
     
-    execution_month = datetime.now().strftime('%Y-%m')
+    # Postpaid billing: gas bills imported "this month" are actually the PREVIOUS
+    # month's consumption to be collected, so default to the consumption month.
+    now = datetime.now()
+    execution_month = (f"{now.year - 1}-12" if now.month == 1 else f"{now.year}-{now.month - 1:02d}")
     print(f"🔄 Processing CSV gas metrics import grid for cycle: {execution_month}...")
 
     success_count = 0
