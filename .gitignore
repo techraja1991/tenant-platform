@@ -21,3 +21,10 @@ static/whatsapp_qr_clean.png
 
 # Data files (secret tokens, feeds, generated exports)
 *.csv
+
+# Generated Gujarat Gas reports (runtime data, archived monthly)
+*.xlsx
+
+# HTML backups (snapshots kept in archive/, not tracked)
+static/index_backup_*
+archive/backups/

@@ -145,18 +145,21 @@ def sends_enabled():
     return (get_setting("reminder_send_enabled", "Y") or "Y").upper() == "Y"
 
 
-def month_reminders(billing_month):
-    """All reminders for a billing month, newest ACTIVE first + history."""
+def month_reminders(year, month):
+    """All reminders whose DUE DATE falls in the given calendar month,
+    newest ACTIVE first + history. Filtered by reminder_date, not billing_month."""
     conn = get_db_connection(as_dict=True)
     cur = conn.cursor()
     cur.execute("""
-        SELECT r.*, t.tenant_name, r2.display_address
+        SELECT r.*, t.tenant_name, r2.display_address,
+               CASE WHEN r.note ILIKE '%%deposit%%' THEN 'deposit' ELSE 'rent' END AS rem_type
         FROM rental_core.tenant_reminders r
         JOIN rental_core.tenants t ON r.tenant_id = t.id
         LEFT JOIN rental_core.rooms r2 ON t.room_id = r2.id
-        WHERE r.billing_month = %s
+        WHERE EXTRACT(YEAR FROM r.reminder_date) = %s
+          AND EXTRACT(MONTH FROM r.reminder_date) = %s
         ORDER BY r.status = 'ACTIVE' DESC, r.reminder_date ASC, r.id DESC
-    """, (billing_month,))
+    """, (year, month))
     rows = cur.fetchall()
     cur.close()
     conn.close()

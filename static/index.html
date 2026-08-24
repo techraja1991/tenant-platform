@@ -26,7 +26,7 @@
         @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
     </style>
 </head>
-<body class="bg-slate-950 text-slate-100 font-sans min-h-screen" x-data="adminApp()" x-init="initData()" x-cloak>
+<body class="bg-slate-950 text-slate-100 font-sans min-h-screen" x-data="adminApp()" x-init="initData()" @keydown.escape.window="closeTopModal()" :class="anyModalOpen ? 'overflow-hidden' : ''" x-cloak>
 
     <!-- ==================== MOBILE TOP APP BAR ==================== -->
     <header class="lg:hidden sticky top-0 z-40 bg-slate-900/95 backdrop-blur border-b border-slate-800 px-3 py-2.5 flex items-center gap-3 safe-bottom">
@@ -228,33 +228,68 @@
                 </button>
             </div>
 
+            <!-- Search / Filter for Tenants -->
+            <div class="bg-slate-900 rounded-xl border border-slate-800 p-3 space-y-2">
+                <div class="relative">
+                    <i class="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm"></i>
+                    <input type="text" x-model="tenantSearch" placeholder="Search tenant name / phone / address..." class="w-full bg-slate-800 border border-slate-700 rounded-lg pl-9 pr-3 py-2.5 text-sm placeholder-slate-500">
+                </div>
+                <div class="flex flex-col lg:flex-row lg:items-center gap-2">
+                    <div class="flex gap-2 items-center min-w-0">
+                        <label class="text-xs text-slate-400 shrink-0 whitespace-nowrap">Status:</label>
+                        <select x-model="tenantStatusFilter" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2.5 text-sm">
+                            <option value="">All</option>
+                            <option value="Y">Active</option>
+                            <option value="N">Inactive</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="text-xs text-slate-500 text-right" x-text="filteredTenants.length + ' tenants shown'"></div>
+            </div>
+
+            <template x-if="netError.tenants">
+                <div class="bg-rose-500/10 border border-rose-600/40 rounded-xl p-3 flex items-center justify-between gap-2">
+                    <span class="text-sm text-rose-300 min-w-0"><i class="fa-solid fa-triangle-exclamation mr-1"></i><span x-text="netError.tenants"></span></span>
+                    <button @click="fetchTenants()" class="text-xs font-semibold bg-rose-500/20 text-rose-200 px-3 py-2 rounded-lg shrink-0">Retry</button>
+                </div>
+            </template>
+
+            <template x-if="netLoading.tenants && !tenants.length">
+                <div class="space-y-3">
+                    <template x-for="i in 4" :key="i"><div class="skeleton h-28 rounded-xl"></div></template>
+                </div>
+            </template>
+
             <!-- mobile tenant cards -->
             <div class="lg:hidden space-y-3">
-                <template x-for="tenant in tenants" :key="tenant.id">
-                    <div class="bg-slate-900 rounded-xl border border-slate-800 p-4">
-                        <div class="flex items-start justify-between gap-2">
+                <template x-for="tenant in paginatedTenants()" :key="tenant.id">
+                    <div class="bg-slate-900 rounded-xl border border-slate-800 p-3">
+                        <!-- Row 1: Name, address, status + WhatsApp + Edit -->
+                        <div class="flex items-center justify-between gap-2">
                             <div class="min-w-0">
                                 <div class="font-semibold truncate" x-text="tenant.tenant_name"></div>
                                 <div class="text-xs text-slate-400 mt-0.5 truncate"><i class="fa-solid fa-location-dot mr-1"></i><span x-text="tenant.display_address"></span></div>
                             </div>
-                            <span class="px-2 py-1 rounded-full text-[10px] font-bold shrink-0" :class="tenant.is_active === 'Y' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'" x-text="tenant.is_active === 'Y' ? 'ACTIVE' : 'INACTIVE'"></span>
+                            <div class="flex items-center gap-1.5 shrink-0">
+                                <span class="px-2 py-1 rounded-full text-[10px] font-bold shrink-0" :class="tenant.is_active === 'Y' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'" x-text="tenant.is_active === 'Y' ? 'ACTIVE' : 'INACTIVE'"></span>
+                                <button @click.stop="openBlankWhatsApp(tenant.phone_number)" class="text-green-400 hover:text-green-300 p-1.5 bg-green-500/10 rounded" title="WhatsApp"><i class="fa-brands fa-whatsapp text-base"></i></button>
+                                <button @click="openEditTenant(tenant)" class="text-indigo-400 hover:text-indigo-300 p-1.5 bg-indigo-500/10 rounded" title="Edit"><i class="fa-solid fa-pen text-base"></i></button>
+                            </div>
                         </div>
-                        <div class="grid grid-cols-3 gap-2 mt-3 text-xs">
-                            <div class="bg-slate-800/60 rounded-lg p-2">
+                        <!-- Row 2: Phone (clickable dialer) + Rent + Lease End -->
+                        <div class="grid grid-cols-3 gap-2 mt-2">
+                            <button @click.stop="openDialer(tenant.phone_number)" class="bg-slate-800/60 rounded-lg p-3 text-left flex flex-col items-start gap-1 min-w-0" title="Call">
                                 <div class="text-slate-500 text-[10px]">Phone</div>
-                                <div class="font-semibold truncate" x-text="tenant.phone_number"></div>
-                            </div>
-                            <div class="bg-slate-800/60 rounded-lg p-2">
+                                <div class="text-sm font-medium truncate text-slate-100 hover:text-green-400 transition" x-text="tenant.phone_number"></div>
+                            </button>
+                            <div class="bg-slate-800/60 rounded-lg p-3 text-left flex flex-col items-start gap-1 min-w-0">
                                 <div class="text-slate-500 text-[10px]">Rent</div>
-                                <div class="font-semibold text-emerald-400" x-text="'₹' + tenant.base_rent_applied"></div>
+                                <div class="text-sm font-semibold text-emerald-400 truncate" x-text="'₹' + tenant.base_rent_applied"></div>
                             </div>
-                            <div class="bg-slate-800/60 rounded-lg p-2">
+                            <div class="bg-slate-800/60 rounded-lg p-3 text-left flex flex-col items-start gap-1 min-w-0">
                                 <div class="text-slate-500 text-[10px]">Lease End</div>
-                                <div class="font-semibold truncate" x-text="tenant.lease_end_date || '—'"></div>
+                                <div class="text-sm font-medium truncate" x-text="tenant.lease_end_date || '—'"></div>
                             </div>
-                        </div>
-                        <div class="flex justify-end mt-3">
-                            <button @click="openEditTenant(tenant)" class="text-indigo-400 hover:text-indigo-300 text-sm"><i class="fa-solid fa-pen mr-1"></i>Edit</button>
                         </div>
                     </div>
                 </template>
@@ -279,12 +314,18 @@
                             </tr>
                         </thead>
                         <tbody class="divide-y divide-slate-800">
-                            <template x-for="tenant in tenants" :key="tenant.id">
+<template x-for="tenant in paginatedTenants()" :key="tenant.id">
                                 <tr class="hover:bg-slate-800/40">
                                     <td class="p-4" x-text="tenant.id"></td>
                                     <td class="p-4 font-semibold" x-text="tenant.tenant_name"></td>
                                     <td class="p-4" x-text="tenant.display_address"></td>
-                                    <td class="p-4" x-text="tenant.phone_number"></td>
+                                    <td class="p-4">
+                                        <div class="flex items-center gap-2">
+                                            <span class="truncate" x-text="tenant.phone_number"></span>
+                                            <button @click.stop="openDialer(tenant.phone_number)" class="text-green-600 hover:text-green-400" title="Call"><i class="fa-solid fa-phone text-sm"></i></button>
+                                            <button @click.stop="openBlankWhatsApp(tenant.phone_number)" class="text-green-400 hover:text-green-300" title="WhatsApp"><i class="fa-brands fa-whatsapp text-sm"></i></button>
+                                        </div>
+                                    </td>
                                     <td class="p-4 text-emerald-400 font-medium" x-text="'₹' + tenant.base_rent_applied"></td>
                                     <td class="p-4 text-slate-400" x-text="'₹' + tenant.maintenance_applied"></td>
                                     <td class="p-4 text-slate-400" x-text="tenant.lease_end_date || '—'"></td>
@@ -302,6 +343,15 @@
                     </table>
                 </div>
             </div>
+
+            <!-- Pagination for Tenants -->
+            <template x-if="totalTenantPages() > 1">
+                <div class="flex items-center justify-center gap-2 mt-4">
+                    <button @click="prevTenantPage()" :disabled="tenantCurrentPage === 1" class="px-3 py-1.5 text-slate-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed rounded-lg"><i class="fa-solid fa-chevron-left"></i></button>
+                    <span class="px-3 text-slate-300 text-sm" x-text="tenantCurrentPage + ' / ' + totalTenantPages()"></span>
+                    <button @click="nextTenantPage()" :disabled="tenantCurrentPage >= totalTenantPages()" class="px-3 py-1.5 text-slate-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed rounded-lg"><i class="fa-solid fa-chevron-right"></i></button>
+                </div>
+            </template>
         </div>
 
         <!-- 2b. PROPERTIES & ROOMS VIEW -->
@@ -508,16 +558,32 @@
 
         <!-- 3b. CUSTOMER VIEW -->
         <div x-show="currentTab === 'customers'" class="space-y-4 sm:space-y-6">
-            <div class="flex justify-between items-center gap-2 flex-wrap">
-                <h1 class="text-2xl lg:text-3xl font-bold">Customer View</h1>
-                <div class="flex gap-2 items-center">
-                    <select x-model="customerSel" @change="onCustomerChange()" class="bg-slate-900 border border-slate-800 rounded p-2.5 text-sm max-w-[150px] sm:max-w-none">
-                        <option value="">— Select —</option>
-                        <template x-for="t in customers" :key="t.id">
-                            <option :value="t.id" x-text="t.tenant_name + (t.is_active === 'N' ? ' (Inactive)' : '')"></option>
-                        </template>
-                    </select>
-                    <input type="number" min="2000" max="2100" x-model.number="customerYear" @change="onCustomerYearChange()" class="bg-slate-900 border border-slate-800 rounded p-2.5 text-sm w-20" title="Year">
+            <h1 class="text-2xl lg:text-3xl font-bold">Customer View</h1>
+
+            <!-- Combined selector card: search + tenant dropdown + year dropdown -->
+            <div class="bg-slate-900 rounded-xl border border-slate-800 p-3 space-y-2">
+                <div class="relative">
+                    <i class="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm"></i>
+                    <input type="text" x-model="customerSearch" placeholder="Search customer by name / address..." class="w-full bg-slate-800 border border-slate-700 rounded-lg pl-9 pr-3 py-2.5 text-sm placeholder-slate-500">
+                </div>
+                <div class="flex gap-2">
+                    <div class="relative flex-1 min-w-0">
+                        <select x-model="customerSel" @change="onCustomerChange()" class="w-full appearance-none bg-slate-800 border border-slate-700 rounded-lg pl-3 pr-8 py-2.5 text-sm truncate">
+                            <option value="">— Select tenant —</option>
+                            <template x-for="t in filteredCustomers" :key="t.id">
+                                <option :value="t.id" x-text="t.tenant_name + ' — ' + (t.display_address || '') + (t.is_active === 'N' ? ' (Inactive)' : '')"></option>
+                            </template>
+                        </select>
+                        <i class="fa-solid fa-chevron-down absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 text-xs pointer-events-none"></i>
+                    </div>
+                    <div class="relative w-28 shrink-0">
+                        <select x-model.number="customerYear" @change="onCustomerYearChange()" class="w-full appearance-none bg-slate-800 border border-slate-700 rounded-lg pl-3 pr-8 py-2.5 text-sm">
+                            <template x-for="y in customerYearOptions" :key="y">
+                                <option :value="y" x-text="y"></option>
+                            </template>
+                        </select>
+                        <i class="fa-solid fa-chevron-down absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 text-xs pointer-events-none"></i>
+                    </div>
                 </div>
             </div>
 
@@ -525,23 +591,43 @@
                 <div class="space-y-4 sm:space-y-6">
                     <!-- customer summary card -->
                     <div class="bg-slate-900 rounded-xl border border-slate-800 p-4 sm:p-6">
-                        <div class="flex justify-between items-start gap-2">
-                            <div class="min-w-0">
+                        <!-- Row 1: Name + Address (left) | Status + Call + WhatsApp + Payment (right) -->
+                        <div class="flex flex-col sm:flex-row sm:justify-between sm:items-start gap-3">
+                            <div class="min-w-0 flex-1">
                                 <h2 class="text-xl sm:text-2xl font-bold truncate" x-text="customerDetail.tenant.tenant_name"></h2>
                                 <p class="text-slate-400 text-sm mt-1 truncate" x-text="(customerDetail.tenant.apartment_name || '') + ' — ' + (customerDetail.tenant.display_address || '')"></p>
                             </div>
-                            <div class="flex flex-col sm:flex-row items-end sm:items-center gap-2">
-                                <span class="px-3 py-1 rounded-full text-xs font-bold" :class="customerDetail.tenant.is_active === 'Y' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'" x-text="customerDetail.tenant.is_active === 'Y' ? 'Active' : 'Inactive'"></span>
-                                <button @click="openWhatsAppForCustomer()" class="bg-green-600 hover:bg-green-500 text-white px-4 py-2 rounded-lg font-medium text-sm flex items-center gap-2" title="Open WhatsApp with this customer's hisab">
-                                    <i class="fa-brands fa-whatsapp text-lg"></i> <span class="hidden sm:inline">Send WhatsApp</span>
+                            <div class="flex items-center gap-2 shrink-0">
+                                <span class="px-3 py-1 rounded-full text-xs font-bold shrink-0" :class="customerDetail.tenant.is_active === 'Y' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'" x-text="customerDetail.tenant.is_active === 'Y' ? 'Active' : 'Inactive'"></span>
+                                <button @click="openDialer(customerDetail.tenant.phone_number)" class="text-green-600 hover:text-green-400 p-1.5 bg-green-500/10 rounded-lg" title="Call"><i class="fa-solid fa-phone text-base"></i></button>
+                                <button @click="openWhatsAppForCustomer()" class="bg-green-600 hover:bg-green-500 text-white px-2.5 py-1.5 rounded-lg font-medium text-xs flex items-center justify-center gap-1" title="Open WhatsApp with this customer's hisab">
+                                    <i class="fa-brands fa-whatsapp text-base"></i> <span class="hidden sm:inline">WhatsApp</span>
+                                </button>
+                                <button @click="openCustomerPaymentModal()" class="bg-indigo-600 hover:bg-indigo-500 text-white px-2.5 py-1.5 rounded-lg font-medium text-xs flex items-center justify-center gap-1" title="Record Payment">
+                                    <i class="fa-solid fa-hand-holding-dollar text-base"></i> <span class="hidden sm:inline">Payment</span>
                                 </button>
                             </div>
                         </div>
                         <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4 text-sm">
                             <div><div class="text-xs text-slate-400">Phone</div><div class="font-semibold mt-0.5 truncate" x-text="customerDetail.tenant.phone_number || '—'"></div></div>
-                            <div><div class="text-xs text-slate-400">Base Rent</div><div class="font-semibold mt-0.5" x-text="'₹' + Number(customerDetail.tenant.base_rent_applied).toLocaleString('en-IN')"></div></div>
-                            <div><div class="text-xs text-slate-400">Maintenance</div><div class="font-semibold mt-0.5" x-text="'₹' + Number(customerDetail.tenant.maintenance_applied).toLocaleString('en-IN')"></div></div>
-                            <div><div class="text-xs text-slate-400">Security Deposit</div><div class="font-semibold mt-0.5" x-text="'₹' + Number(customerDetail.tenant.security_deposit_applied).toLocaleString('en-IN')"></div></div>
+                            <div class="grid grid-cols-2 gap-3 sm:col-span-2">
+                                <div><div class="text-xs text-slate-400">Base Rent</div><div class="font-semibold mt-0.5" x-text="'₹' + Number(customerDetail.tenant.base_rent_applied).toLocaleString('en-IN')"></div></div>
+                                <div><div class="text-xs text-slate-400">Maintenance</div><div class="font-semibold mt-0.5" x-text="'₹' + Number(customerDetail.tenant.maintenance_applied).toLocaleString('en-IN')"></div></div>
+                            </div>
+                            <template x-if="customerDetail.deposit">
+                                <div class="col-span-2 sm:col-span-1">
+                                    <div class="text-xs text-slate-400">Security Deposit</div>
+                                    <div class="flex items-center gap-2 mt-0.5">
+                                        <span class="font-semibold" x-text="'₹' + Number(customerDetail.deposit.received).toLocaleString('en-IN')"></span>
+                                        <button @click="openDepositDetailModal()" class="px-2 py-0.5 rounded text-xs font-bold cursor-pointer"
+                                            :class="customerDetail.deposit.status === 'Full' ? 'bg-emerald-500/20 text-emerald-400' : (customerDetail.deposit.status === 'Partial' ? 'bg-amber-500/20 text-amber-400' : 'bg-rose-500/20 text-rose-400')"
+                                            x-text="customerDetail.deposit.status" title="View deposit details"></button>
+                                    </div>
+                                </div>
+                            </template>
+                            <template x-if="!customerDetail.deposit">
+                                <div><div class="text-xs text-slate-400">Security Deposit</div><div class="font-semibold mt-0.5" x-text="'₹' + Number(customerDetail.tenant.security_deposit_applied || 0).toLocaleString('en-IN')"></div></div>
+                            </template>
                             <div><div class="text-xs text-slate-400">Lease Start</div><div class="font-semibold mt-0.5" x-text="customerDetail.tenant.lease_start_date || '—'"></div></div>
                             <div><div class="text-xs text-slate-400">Lease End</div><div class="font-semibold mt-0.5" x-text="customerDetail.tenant.lease_end_date || '—'"></div></div>
                             <div><div class="text-xs text-slate-400">Property</div><div class="font-semibold mt-0.5" x-text="customerDetail.tenant.plot_number || '—'"></div></div>
@@ -608,6 +694,37 @@
             </div>
 
             <!-- sub-tab selector -->
+            <!-- GLOBAL search / property filter / sort — applies to Ledger AND Payment History -->
+            <div class="bg-slate-900 rounded-xl border border-slate-800 p-3 space-y-2">
+                <div class="relative">
+                    <i class="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm"></i>
+                    <input type="text" x-model="ledgerSearch" placeholder="Search tenant / address / note..." class="w-full bg-slate-800 border border-slate-700 rounded-lg pl-9 pr-3 py-2.5 text-sm placeholder-slate-500">
+                </div>
+                <div class="flex flex-col lg:flex-row lg:items-center gap-2">
+                    <div class="relative flex-1 min-w-0">
+                        <i class="fa-solid fa-building absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm"></i>
+                        <select x-model="ledgerPropertyFilter" class="w-full appearance-none bg-slate-800 border border-slate-700 rounded-lg pl-9 pr-8 py-2.5 text-sm">
+                            <option value="">All Properties</option>
+                            <template x-for="prop in ledgerProperties" :key="prop.id">
+                                <option :value="prop.id" x-text="prop.apartment_name"></option>
+                            </template>
+                        </select>
+                        <i class="fa-solid fa-chevron-down absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 text-xs pointer-events-none"></i>
+                    </div>
+                    <div class="flex gap-2 items-center min-w-0 lg:w-64">
+                        <label class="text-xs text-slate-400 shrink-0 whitespace-nowrap"><i class="fa-solid fa-arrow-down-wide-short mr-1"></i>Sort:</label>
+                        <select x-model="ledgerSort" class="flex-1 min-w-0 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2.5 text-sm">
+                            <option value="address">Property / Address</option>
+                            <option value="outstanding-desc">Outstanding (High &rarr; Low)</option>
+                            <option value="outstanding-asc">Outstanding (Low &rarr; High)</option>
+                            <option value="paid-desc">Paid (High &rarr; Low)</option>
+                            <option value="paid-asc">Paid (Low &rarr; High)</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="text-xs text-slate-500 text-right" x-text="(ledgerSubTab === 'ledger' ? filteredLedgers.length : filteredPayments.length) + ' entries shown'"></div>
+            </div>
+
             <div class="grid grid-cols-2 gap-2">
                 <button @click="ledgerSubTab = 'ledger'" :class="ledgerSubTab === 'ledger' ? 'bg-indigo-600 text-white' : 'bg-slate-900 text-slate-400 border border-slate-800'" class="px-4 py-3 lg:py-2 rounded-lg font-medium text-sm">
                     <i class="fa-solid fa-table-list"></i> Ledger
@@ -627,40 +744,9 @@
                     </div>
                 </div>
 
-                <!-- Search / property filter / sort -->
-                <div class="bg-slate-900 rounded-xl border border-slate-800 p-3 space-y-2">
-                    <div class="relative">
-                        <i class="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm"></i>
-                        <input type="text" x-model="ledgerSearch" placeholder="Search tenant / address..." class="w-full bg-slate-800 border border-slate-700 rounded-lg pl-9 pr-3 py-2.5 text-sm placeholder-slate-500">
-                    </div>
-                    <div class="flex flex-col lg:flex-row lg:items-center gap-2">
-                        <div class="relative flex-1">
-                            <i class="fa-solid fa-building absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm"></i>
-                            <select x-model="ledgerPropertyFilter" class="w-full appearance-none bg-slate-800 border border-slate-700 rounded-lg pl-9 pr-8 py-2.5 text-sm">
-                                <option value="">All Properties</option>
-                                <template x-for="prop in ledgerProperties" :key="prop.id">
-                                    <option :value="prop.id" x-text="prop.apartment_name"></option>
-                                </template>
-                            </select>
-                            <i class="fa-solid fa-chevron-down absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 text-xs pointer-events-none"></i>
-                        </div>
-                        <div class="flex gap-2 items-center min-w-0">
-                            <label class="text-xs text-slate-400 shrink-0 whitespace-nowrap"><i class="fa-solid fa-arrow-down-wide-short mr-1"></i>Sort:</label>
-                            <select x-model="ledgerSort" class="flex-1 min-w-0 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2.5 text-sm">
-                                <option value="address">Property / Address</option>
-                                <option value="outstanding-desc">Outstanding (High → Low)</option>
-                                <option value="outstanding-asc">Outstanding (Low → High)</option>
-                                <option value="paid-desc">Payment Received (High → Low)</option>
-                                <option value="paid-asc">Payment Received (Low → High)</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div class="text-xs text-slate-500 text-right" x-text="filteredLedgers.length + ' entries shown'"></div>
-                </div>
-
                 <!-- mobile ledger cards (DETAILED) -->
                 <div x-show="ledgerView === 'detailed'" class="lg:hidden space-y-3">
-                    <template x-for="ledger in filteredLedgers" :key="ledger.id">
+                    <template x-for="ledger in paginatedLedgers()" :key="ledger.id">
                         <div class="bg-slate-900 rounded-xl border border-slate-800 overflow-hidden">
                             <div class="flex items-start justify-between gap-2 p-4 pb-0">
                                 <div class="min-w-0">
@@ -709,7 +795,7 @@
                                 </tr>
                             </thead>
                             <tbody class="divide-y divide-slate-800">
-                                <template x-for="ledger in filteredLedgers" :key="ledger.id">
+                                <template x-for="ledger in paginatedLedgers()" :key="ledger.id">
                                     <tr class="hover:bg-slate-800/40 cursor-pointer" @click="openPaymentForTenant(ledger.tenant_id)">
                                         <td class="p-3 font-semibold" x-text="ledger.display_address"></td>
                                         <td class="p-3" x-text="ledger.tenant_name"></td>
@@ -740,7 +826,7 @@
 
                 <!-- mobile summary cards -->
                 <div x-show="ledgerView === 'summary'" class="lg:hidden space-y-3">
-                    <template x-for="ledger in filteredLedgers" :key="ledger.id">
+                    <template x-for="ledger in paginatedLedgers()" :key="ledger.id">
                         <div class="bg-slate-900 rounded-xl border border-slate-800 overflow-hidden">
                             <div class="flex items-start justify-between gap-2 p-4 pb-0">
                                 <div class="min-w-0">
@@ -781,7 +867,7 @@
                                 </tr>
                             </thead>
                             <tbody class="divide-y divide-slate-800">
-                                <template x-for="ledger in filteredLedgers" :key="ledger.id">
+                                <template x-for="ledger in paginatedLedgers()" :key="ledger.id">
                                     <tr class="hover:bg-slate-800/40 cursor-pointer" @click="openPaymentForTenant(ledger.tenant_id)">
                                         <td class="p-3 font-semibold" x-text="ledger.display_address"></td>
                                         <td class="p-3" x-text="ledger.tenant_name"></td>
@@ -803,13 +889,22 @@
                         </table>
                     </div>
                 </div>
+
+                <!-- Ledger pagination (bottom) -->
+                <template x-if="totalLedgerPages() > 1">
+                    <div class="flex items-center justify-center gap-2">
+                        <button @click="prevLedgerPage()" :disabled="ledgerCurrentPage === 1" class="px-3 py-1.5 text-slate-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed rounded-lg"><i class="fa-solid fa-chevron-left"></i></button>
+                        <span class="px-3 text-slate-300 text-sm" x-text="ledgerCurrentPage + ' / ' + totalLedgerPages()"></span>
+                        <button @click="nextLedgerPage()" :disabled="ledgerCurrentPage >= totalLedgerPages()" class="px-3 py-1.5 text-slate-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed rounded-lg"><i class="fa-solid fa-chevron-right"></i></button>
+                    </div>
+                </template>
             </div>
 
             <!-- Payment History sub-tab -->
             <div x-show="ledgerSubTab === 'history'" class="space-y-4">
                 <!-- mobile payment cards -->
                 <div class="lg:hidden space-y-3">
-                    <template x-for="pay in payments" :key="pay.id">
+                    <template x-for="pay in paginatedPayments()" :key="pay.id">
                         <div class="bg-slate-900 rounded-xl border border-slate-800 p-4">
                             <div class="flex items-start justify-between gap-2">
                                 <div class="min-w-0">
@@ -832,9 +927,16 @@
                         </div>
                     </template>
                     <p x-show="!payments.length" class="text-center text-slate-500 text-sm py-8">No payments recorded for this month.</p>
-                </div>
 
-                <!-- desktop payment table -->
+                <!-- Payment History pagination -->
+                <template x-if="totalPaymentPages() > 1">
+                    <div class="flex items-center justify-center gap-2">
+                        <button @click="prevPaymentPage()" :disabled="paymentCurrentPage === 1" class="px-3 py-1.5 text-slate-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed rounded-lg"><i class="fa-solid fa-chevron-left"></i></button>
+                        <span class="px-3 text-slate-300 text-sm" x-text="paymentCurrentPage + ' / ' + totalPaymentPages()"></span>
+                        <button @click="nextPaymentPage()" :disabled="paymentCurrentPage >= totalPaymentPages()" class="px-3 py-1.5 text-slate-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed rounded-lg"><i class="fa-solid fa-chevron-right"></i></button>
+                    </div>
+                </template>
+            </div>
                 <div class="hidden lg:block bg-slate-900 rounded-xl border border-slate-800 overflow-hidden">
                     <div class="table-scroll overflow-x-auto">
                         <table class="w-full text-left border-collapse text-sm min-w-max">
@@ -845,7 +947,7 @@
                                 </tr>
                             </thead>
                             <tbody class="divide-y divide-slate-800">
-                                <template x-for="pay in payments" :key="pay.id">
+                                <template x-for="pay in paginatedPayments()" :key="pay.id">
                                     <tr class="hover:bg-slate-800/40">
                                         <td class="p-3 text-slate-400" x-text="pay.id"></td>
                                         <td class="p-3" x-text="pay.payment_date"></td>
@@ -871,6 +973,32 @@
         <!-- 5. SECURITY DEPOSIT STATUS VIEW -->
         <div x-show="currentTab === 'payments'" class="space-y-4 sm:space-y-6">
             <h1 class="text-2xl lg:text-3xl font-bold">Security Deposit Status</h1>
+
+            <!-- Gujarat Gas Reports download -->
+            <div class="bg-slate-800 border border-slate-700 rounded-xl p-4 flex items-center gap-3 flex-wrap">
+                <div class="bg-emerald-500/20 p-3 rounded-lg shrink-0">
+                    <i class="fa-solid fa-file-arrow-down text-emerald-400 text-xl"></i>
+                </div>
+                <div class="min-w-0 flex-1">
+                    <div class="font-semibold text-sm">Gujarat Gas Reports</div>
+                    <div class="text-xs text-slate-400">Monthly CSV / Excel exports</div>
+                </div>
+                <div class="flex gap-2">
+                    <button @click="downloadGasReport('csv')"
+                            class="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white px-3 py-2.5 sm:py-2 rounded-lg text-sm font-medium flex items-center gap-1.5"
+                            :disabled="!gasReports.csvExists" title="Download CSV">
+                        <i class="fa-solid fa-file-csv"></i> <span class="hidden sm:inline">CSV</span>
+                    </button>
+                    <button @click="downloadGasReport('xlsx')"
+                            class="bg-green-600 hover:bg-green-500 disabled:opacity-40 disabled:cursor-not-allowed text-white px-3 py-2.5 sm:py-2 rounded-lg text-sm font-medium flex items-center gap-1.5"
+                            :disabled="!gasReports.xlsxExists" title="Download Excel">
+                        <i class="fa-solid fa-file-excel"></i> <span class="hidden sm:inline">Excel</span>
+                    </button>
+                    <button @click="refreshGasReports()" class="bg-slate-700 hover:bg-slate-600 text-white px-3 py-2.5 sm:py-2 rounded-lg" title="Refresh">
+                        <i class="fa-solid fa-rotate"></i>
+                    </button>
+                </div>
+            </div>
 
             <!-- mobile deposit cards -->
             <div class="lg:hidden space-y-3">
@@ -1035,20 +1163,32 @@
                                 <div class="font-semibold truncate" x-text="r.tenant_name"></div>
                                 <div class="text-xs text-slate-400 truncate" x-text="r.display_address || '—'"></div>
                             </div>
-                            <span class="px-2 py-1 rounded-full text-[10px] font-bold shrink-0"
-                                  :class="r.status === 'ACTIVE' ? 'bg-emerald-500/20 text-emerald-400' : (r.status === 'SUPERSEDED' ? 'bg-amber-500/20 text-amber-400' : (r.status === 'DONE' ? 'bg-sky-500/20 text-sky-400' : 'bg-rose-500/20 text-rose-400'))"
-                                  x-text="r.status === 'SUPERSEDED' ? 'SUPERSEDED' : r.status"></span>
+<div class="flex flex-col items-end gap-1 shrink-0">
+                            <span class="px-2 py-1 rounded-full text-[10px] font-bold"
+      :class="r.status === 'ACTIVE' ? 'bg-emerald-500/20 text-emerald-400' : (r.status === 'SUPERSEDED' ? 'bg-amber-500/20 text-amber-400' : (r.status === 'DONE' ? 'bg-sky-500/20 text-sky-400' : (r.status === 'NOT_SET' ? 'bg-slate-500/20 text-slate-400' : 'bg-rose-500/20 text-rose-400')))"
+      x-text="r.status === 'SUPERSEDED' ? 'SUPERSEDED' : r.status"></span>
+                            <span class="px-1.5 py-0.5 rounded text-[9px] font-bold" 
+      :class="(r.note || '').includes('eposit') || r.remType === 'deposit' ? 'bg-purple-500/20 text-purple-400' : 'bg-indigo-500/20 text-indigo-400'"
+      x-text="(r.note || '').includes('eposit') || r.remType === 'deposit' ? 'DEPOSIT' : 'RENT'"></span>
+                        </div>
                         </div>
                         <div class="grid grid-cols-2 gap-2 mt-3 text-xs">
-                            <div class="bg-slate-800/60 rounded-lg p-2"><div class="text-slate-500 text-[10px]">Due Date</div><div class="font-semibold text-sky-400" x-text="formatReminderDate(r.reminder_date)"></div></div>
+                            <div class="bg-slate-800/60 rounded-lg p-2"><div class="text-slate-500 text-[10px]">Due Date</div><div class="font-semibold text-sky-400" x-text="formatReminderDate(r.reminder_date, r.status)"></div></div>
                             <div class="bg-slate-800/60 rounded-lg p-2"><div class="text-slate-500 text-[10px]">Amount</div><div class="font-semibold" x-text="'Rs. ' + fmtNum(r.amount_due)"></div></div>
                             <div class="bg-slate-800/60 rounded-lg p-2"><div class="text-slate-500 text-[10px]">Notify</div><div class="font-semibold" x-text="r.notify_sent_at ? fmtTime(r.notify_sent_at) : '—'"></div></div>
                             <div class="bg-slate-800/60 rounded-lg p-2"><div class="text-slate-500 text-[10px]">D-1 / Due</div><div class="font-semibold" x-text="(r.d1_sent_at ? '✓' : '—') + ' / ' + (r.due_sent_at ? '✓' : '—')"></div></div>
                         </div>
                         <div x-show="r.note" class="text-xs text-slate-500 mt-2 truncate" x-text="r.note"></div>
-                        <div class="flex justify-end gap-4 mt-3 text-base">
-                            <button @click="openEditReminderModal(r)" class="text-indigo-400" title="Edit date"><i class="fa-solid fa-pen"></i></button>
-                            <button @click="deleteReminder(r)" class="text-rose-400" title="Delete"><i class="fa-solid fa-trash-can"></i></button>
+                        <div class="flex justify-end items-center gap-3 mt-3 text-base">
+                            <template x-if="r.status === 'NOT_SET'">
+                                <button @click="openSetReminderModalFor(r.tenant_id, r.amount_due)" class="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1"><i class="fa-solid fa-calendar-plus"></i> Set Due Date</button>
+                            </template>
+                            <template x-if="r.status !== 'NOT_SET' && r.id !== null">
+                                <span class="flex gap-4">
+                                    <button @click="openEditReminderModal(r)" class="text-indigo-400" title="Edit date"><i class="fa-solid fa-pen"></i></button>
+                                    <button @click="deleteReminder(r)" class="text-rose-400" title="Delete"><i class="fa-solid fa-trash-can"></i></button>
+                                </span>
+                            </template>
                         </div>
                     </div>
                 </template>
@@ -1061,7 +1201,7 @@
                     <table class="w-full text-left border-collapse text-sm min-w-max">
                         <thead class="bg-slate-800/60 text-slate-300">
                             <tr>
-                                <th class="p-3">Tenant</th><th class="p-3">Due Date</th><th class="p-3">Amount</th><th class="p-3">Status</th>
+                                <th class="p-3">Tenant</th><th class="p-3">Type</th><th class="p-3">Due Date</th><th class="p-3">Amount</th><th class="p-3">Status</th>
                                 <th class="p-3">Notify</th><th class="p-3">D-1</th><th class="p-3">Due</th><th class="p-3">Note</th><th class="p-3"></th>
                             </tr>
                         </thead>
@@ -1069,16 +1209,26 @@
                             <template x-for="r in reminders" :key="r.id">
                                 <tr class="hover:bg-slate-800/40" :class="r.status === 'SUPERSEDED' ? 'opacity-50' : ''">
                                     <td class="p-3"><div class="font-semibold" x-text="r.tenant_name"></div><div class="text-xs text-slate-400" x-text="r.display_address || '—'"></div></td>
-                                    <td class="p-3" x-text="formatReminderDate(r.reminder_date)"></td>
+                                    <td class="p-3"><span class="px-2 py-0.5 rounded text-[10px] font-bold" 
+                                        :class="(r.note || '').includes('eposit') || r.remType === 'deposit' ? 'bg-purple-500/20 text-purple-400' : 'bg-indigo-500/20 text-indigo-400'" 
+                                        x-text="(r.note || '').includes('eposit') || r.remType === 'deposit' ? 'DEPOSIT' : 'RENT'"></span></td>
+                                    <td class="p-3" x-text="formatReminderDate(r.reminder_date, r.status)"></td>
                                     <td class="p-3 font-medium" x-text="'Rs. ' + fmtNum(r.amount_due)"></td>
-                                    <td class="p-3"><span class="px-2 py-0.5 rounded text-xs font-bold" :class="r.status === 'ACTIVE' ? 'bg-emerald-500/20 text-emerald-400' : (r.status === 'SUPERSEDED' ? 'bg-amber-500/20 text-amber-400' : (r.status === 'DONE' ? 'bg-sky-500/20 text-sky-400' : 'bg-rose-500/20 text-rose-400'))" x-text="r.status === 'SUPERSEDED' ? 'SUPERSEDED' : r.status"></span></td>
+                                    <td class="p-3"><span class="px-2 py-0.5 rounded text-xs font-bold" :class="r.status === 'ACTIVE' ? 'bg-emerald-500/20 text-emerald-400' : (r.status === 'SUPERSEDED' ? 'bg-amber-500/20 text-amber-400' : (r.status === 'DONE' ? 'bg-sky-500/20 text-sky-400' : (r.status === 'NOT_SET' ? 'bg-slate-500/20 text-slate-400' : 'bg-rose-500/20 text-rose-400')))" x-text="r.status === 'SUPERSEDED' ? 'SUPERSEDED' : r.status"></span></td>
                                     <td class="p-3 text-xs" x-text="r.notify_sent_at ? fmtTime(r.notify_sent_at) : '—'"></td>
                                     <td class="p-3 text-xs" x-text="r.d1_sent_at ? fmtTime(r.d1_sent_at) : '—'"></td>
                                     <td class="p-3 text-xs" x-text="r.due_sent_at ? fmtTime(r.due_sent_at) : '—'"></td>
                                     <td class="p-3 text-xs text-slate-400 max-w-[160px] truncate" x-text="r.note || '—'"></td>
                                     <td class="p-3 text-right whitespace-nowrap">
-                                        <button @click="openEditReminderModal(r)" class="text-slate-400 hover:text-indigo-400 mr-2" title="Edit date"><i class="fa-solid fa-pen"></i></button>
-                                        <button @click="deleteReminder(r)" class="text-rose-400 hover:text-rose-300" title="Delete"><i class="fa-solid fa-trash-can"></i></button>
+                                        <template x-if="r.status === 'NOT_SET'">
+                                            <button @click="openSetReminderModalFor(r.tenant_id, r.amount_due)" class="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-lg text-xs font-medium">Set Due Date</button>
+                                        </template>
+                                        <template x-if="r.status !== 'NOT_SET' && r.id !== null">
+                                            <span>
+                                                <button @click="openEditReminderModal(r)" class="text-slate-400 hover:text-indigo-400 mr-2" title="Edit date"><i class="fa-solid fa-pen"></i></button>
+                                                <button @click="deleteReminder(r)" class="text-rose-400 hover:text-rose-300" title="Delete"><i class="fa-solid fa-trash-can"></i></button>
+                                            </span>
+                                        </template>
                                     </td>
                                 </tr>
                             </template>
@@ -1090,25 +1240,124 @@
 
     </main>
 
+    <!-- ==================== TOASTS ==================== -->
+    <div class="fixed bottom-20 lg:bottom-6 inset-x-0 lg:inset-x-auto lg:right-6 z-[60] flex flex-col items-center lg:items-end gap-2 px-4 pointer-events-none" aria-live="polite">
+        <template x-for="t in toasts" :key="t.id">
+            <div class="pointer-events-auto max-w-sm flex items-start gap-2.5 px-4 py-3 rounded-xl shadow-xl border text-sm cursor-pointer backdrop-blur"
+                 :class="t.type === 'error' ? 'bg-rose-950/95 border-rose-700 text-rose-100' : t.type === 'info' ? 'bg-slate-900/95 border-indigo-600 text-slate-100' : t.type === 'warn' ? 'bg-amber-950/95 border-amber-600 text-amber-100' : 'bg-emerald-950/95 border-emerald-600 text-emerald-100'"
+                 @click="dismissToast(t.id)">
+                <i class="mt-0.5" :class="t.type === 'error' ? 'fa-solid fa-circle-exclamation text-rose-400' : t.type === 'info' ? 'fa-solid fa-circle-info text-indigo-400' : t.type === 'warn' ? 'fa-solid fa-triangle-exclamation text-amber-400' : 'fa-solid fa-circle-check text-emerald-400'"></i>
+                <span class="whitespace-pre-line" x-text="t.msg"></span>
+            </div>
+        </template>
+    </div>
+
+<!-- Go to Top Button -->
+    <button x-show="showGoToTop" @click="goToTop()" class="fixed bottom-20 lg:bottom-6 right-4 lg:right-6 z-[55] bg-indigo-600 hover:bg-indigo-500 text-white w-11 h-11 rounded-full shadow-lg flex items-center justify-center transition-opacity duration-200" :class="showGoToTop ? 'opacity-100' : 'opacity-0 pointer-events-none'" title="Go to top" aria-label="Go to top">
+        <i class="fa-solid fa-arrow-up"></i>
+    </button>
+
     <!-- ==================== MODALS ==================== -->
 
     <!-- ADD TENANT MODAL -->
-    <div x-show="showAddTenantModal" x-cloak class="fixed inset-0 bg-black/70 flex items-end sm:items-center justify-center z-50">
+    <div x-show="showAddTenantModal" x-cloak class="fixed inset-0 bg-black/70 flex items-end sm:items-center justify-center z-50" @click.self="showAddTenantModal = false">
         <div class="bg-slate-900 rounded-t-2xl sm:rounded-xl p-5 sm:p-6 border border-slate-800 max-w-md w-full space-y-4 max-h-[92vh] overflow-y-auto">
             <div class="flex items-center justify-between">
                 <h2 class="text-xl font-bold">Add New Tenant</h2>
                 <button @click="showAddTenantModal = false" class="text-slate-400 text-xl"><i class="fa-solid fa-xmark"></i></button>
             </div>
-            <div><label class="text-sm text-slate-400">Room</label><select x-model="newTenant.room_id" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1"><template x-for="room in rooms" :key="room.id"><option :value="room.id" x-text="room.display_address"></option></template></select></div>
-            <div><label class="text-sm text-slate-400">Tenant Full Name</label><input type="text" x-model="newTenant.tenant_name" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1" placeholder="John Doe"></div>
-            <div><label class="text-sm text-slate-400">Phone Number (WhatsApp)</label><input type="text" x-model="newTenant.phone_number" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1" placeholder="9876543210"></div>
-            <div class="grid grid-cols-2 gap-3">
-                <div><label class="text-sm text-slate-400">Applied Rent (₹)</label><input type="number" x-model="newTenant.base_rent_applied" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1" placeholder="3300"></div>
-                <div><label class="text-sm text-slate-400">Maintenance (₹)</label><input type="number" x-model="newTenant.maintenance_applied" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1" placeholder="0"></div>
+
+            <!-- Smart Unit Selector -->
+            <div class="space-y-2">
+                <label class="text-sm text-slate-400">Select Unit <span class="text-rose-400">*</span></label>
+                <template x-if="netLoading.vacantRooms && !vacantRooms.length">
+                    <div class="space-y-2"><template x-for="i in 3" :key="i"><div class="skeleton h-12 rounded-lg"></div></template></div>
+                </template>
+                <template x-if="netError.vacantRooms">
+                    <div class="text-sm text-rose-400">Failed to load units. <button @click="fetchVacantRooms()" class="text-indigo-400 underline">Retry</button></div>
+                </template>
+                <div x-show="vacantRooms.length" class="max-h-64 overflow-y-auto space-y-2 pr-1">
+                    <template x-for="prop in vacantRooms" :key="prop.property_id">
+                        <div class="bg-slate-800/40 rounded-lg border border-slate-700 p-3">
+                            <div class="flex items-center justify-between gap-2 mb-2">
+                                <span class="font-medium text-sm truncate" x-text="prop.apartment_name + ' (' + prop.plot_number + ')'"></span>
+                                <span class="text-xs text-slate-400 shrink-0">Property</span>
+                            </div>
+                            <div class="space-y-1.5">
+                                <template x-for="room in prop.rooms" :key="room.id">
+                                    <label class="flex items-center gap-3 p-2 rounded-lg border border-slate-700 cursor-pointer hover:bg-slate-800/50 transition"
+                                         :class="{ 'border-emerald-500/50 bg-emerald-500/5': Number(newTenant.room_id) === room.id && room.status === 'vacant',
+                                                    'border-sky-500/50 bg-sky-500/5': Number(newTenant.room_id) === room.id && room.status === 'upcoming',
+                                                    'border-rose-500/50 bg-rose-500/5': Number(newTenant.room_id) === room.id && room.status === 'occupied' }">
+                                        <input type="radio" name="addTenantRoom" :value="room.id" x-model.number="newTenant.room_id" class="accent-indigo-500" @change="onRoomSelect(room, prop)">
+                                        <div class="flex-1 min-w-0 flex items-center gap-2 flex-wrap">
+                                            <span class="font-medium text-sm truncate" x-text="room.display_address"></span>
+                                            <span x-show="room.status === 'vacant'" class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-400">Vacant</span>
+                                            <span x-show="room.status === 'upcoming'" class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-sky-500/20 text-sky-400" x-text="room.status_label"></span>
+                                            <span x-show="room.status === 'occupied'" class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-500/20 text-rose-400">Occupied</span>
+                                            <span x-show="room.current_tenant" class="text-[11px] text-slate-500 truncate w-full" x-text="'Current: ' + room.current_tenant"></span>
+                                        </div>
+                                    </label>
+                                </template>
+                            </div>
+                        </div>
+                    </template>
+                </div>
             </div>
+
+            <!-- Property Defaults + Load Defaults button -->
+            <template x-if="selectedPropertyDefaults">
+                <div class="bg-indigo-500/10 border border-indigo-500/20 rounded-lg p-3 space-y-2">
+                    <div class="flex items-center justify-between gap-2">
+                        <span class="text-xs text-indigo-400 font-medium truncate" x-text="selectedPropertyDefaults.apartment_name + ' (' + selectedPropertyDefaults.plot_number + ')'"></span>
+                        <button @click="loadPropertyDefaults(selectedPropertyDefaults)" class="text-indigo-300 hover:text-indigo-200 text-xs px-3 py-1.5 rounded border border-indigo-500/30 bg-indigo-500/10 transition whitespace-nowrap">
+                            <i class="fa-solid fa-download mr-1"></i> Load Defaults
+                        </button>
+                    </div>
+                    <div class="grid grid-cols-3 gap-2 text-xs">
+                        <div class="bg-slate-800/50 rounded p-2"><div class="text-slate-500">Rent</div><div class="font-semibold text-emerald-400" x-text="'₹' + selectedPropertyDefaults.default_base_rent"></div></div>
+                        <div class="bg-slate-800/50 rounded p-2"><div class="text-slate-500">Maintenance</div><div class="font-semibold text-sky-400" x-text="'₹' + selectedPropertyDefaults.default_maintenance_fee"></div></div>
+                        <div class="bg-slate-800/50 rounded p-2"><div class="text-slate-500">Sec. Deposit</div><div class="font-semibold text-amber-400" x-text="'₹' + selectedPropertyDefaults.default_security_deposit"></div></div>
+                    </div>
+                </div>
+            </template>
+
+            <div><label class="text-sm text-slate-400">Tenant Full Name <span class="text-rose-400">*</span></label><input type="text" x-model="newTenant.tenant_name" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1" placeholder="John Doe"></div>
+            <div><label class="text-sm text-slate-400">Phone Number (WhatsApp) <span class="text-rose-400">*</span></label><input type="text" inputmode="numeric" x-model="newTenant.phone_number" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1" placeholder="9876543210"></div>
             <div class="grid grid-cols-2 gap-3">
-                <div><label class="text-sm text-slate-400">Security Deposit (₹)</label><input type="number" x-model="newTenant.security_deposit_applied" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1" placeholder="5000"></div>
-                <div><label class="text-sm text-slate-400">Lease Start Date</label><input type="date" x-model="newTenant.lease_start_date" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1"></div>
+                <div><label class="text-sm text-slate-400">Applied Rent (₹) <span class="text-rose-400">*</span></label><input type="number" inputmode="decimal" min="0" x-model.number="newTenant.base_rent_applied" @input="calcPendingDeposit()" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1" placeholder="3300"></div>
+                <div><label class="text-sm text-slate-400">Maintenance (₹)</label><input type="number" inputmode="decimal" min="0" x-model.number="newTenant.maintenance_applied" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1" placeholder="0"></div>
+            </div>
+
+            <!-- Security Deposit & Booking -->
+            <div class="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 space-y-3">
+                <div class="text-xs text-amber-400 font-medium"><i class="fa-solid fa-shield-halved mr-1"></i>Security Deposit &amp; Booking</div>
+                <div class="grid grid-cols-2 gap-3">
+                    <div><label class="text-sm text-slate-400">Deposit Required (₹) <span class="text-rose-400">*</span></label><input type="number" inputmode="decimal" min="0" x-model.number="newTenant.security_deposit_applied" @input="calcPendingDeposit()" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1" placeholder="5000"></div>
+                    <div><label class="text-sm text-slate-400">Booking Amount Paid (₹)</label><input type="number" inputmode="decimal" min="0" x-model.number="newTenant.booking_amount_paid" @input="calcPendingDeposit()" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1" placeholder="0"></div>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                    <div class="bg-emerald-500/10 border border-emerald-500/20 rounded-lg p-3 text-center">
+                        <div class="text-xs text-slate-500">Pending Deposit</div>
+                        <div class="font-bold text-lg" :class="pendingSecurityDeposit > 0 ? 'text-rose-400' : 'text-emerald-400'" x-text="'₹' + Number(pendingSecurityDeposit).toLocaleString('en-IN')"></div>
+                    </div>
+                    <div><label class="text-sm text-slate-400">Pending Due Date</label><input type="date" x-model="newTenant.pending_deposit_due_date" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1"></div>
+                </div>
+                <p class="text-[11px] text-slate-500 -mt-1">Booking amount is recorded as a DEPOSIT payment and reduces the pending security deposit.</p>
+            </div>
+
+            <!-- Deposit due reminder preview (same save) -->
+            <template x-if="newTenant.pending_deposit_due_date && Number(pendingSecurityDeposit) > 0">
+                <div class="bg-slate-800/60 border border-slate-700 rounded-lg p-3 text-xs whitespace-pre-line text-slate-300 leading-relaxed">
+                    <div class="text-[10px] font-bold text-green-400 uppercase tracking-wide mb-1"><i class="fa-brands fa-whatsapp mr-1"></i>Reminder preview — will be set on save</div>
+                    <span x-text="tenantDepositReminderPreview"></span>
+                </div>
+            </template>
+
+            <!-- Lease Dates side-by-side -->
+            <div class="grid grid-cols-2 gap-3">
+                <div><label class="text-sm text-slate-400">Lease Start <span class="text-rose-400">*</span></label><input type="date" x-model="newTenant.lease_start_date" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1"></div>
+                <div><label class="text-sm text-slate-400">Lease End</label><input type="date" x-model="newTenant.lease_end_date" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1"></div>
             </div>
             <div class="flex gap-2 mt-4">
                 <button @click="showAddTenantModal = false" class="flex-1 px-4 py-3 bg-slate-700 rounded-lg hover:bg-slate-600">Cancel</button>
@@ -1131,6 +1380,14 @@
             <div class="grid grid-cols-2 gap-3">
                 <div><label class="text-sm text-slate-400">Security Deposit (₹)</label><input type="number" x-model="editTenant.security_deposit_applied" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1"></div>
                 <div><label class="text-sm text-slate-400">Status</label><select x-model="editTenant.is_active" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1"><option value="Y">Active</option><option value="N">Inactive</option></select></div>
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+                <div><label class="text-sm text-slate-400">Booking Amount Paid (₹)</label><input type="number" inputmode="decimal" min="0" x-model.number="editTenant.booking_amount_paid" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1" placeholder="0"></div>
+                <div><label class="text-sm text-slate-400">Deposit Due Date</label><input type="date" x-model="editTenant.pending_deposit_due_date" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1"></div>
+            </div>
+            <div class="bg-emerald-500/10 border border-emerald-500/20 rounded-lg px-4 py-2 flex justify-between items-center text-sm">
+                <span class="text-slate-400">Pending Deposit</span>
+                <span class="font-bold" :class="editDepositPending > 0 ? 'text-rose-400' : 'text-emerald-400'" x-text="'₹' + Number(editDepositPending).toLocaleString('en-IN')"></span>
             </div>
             <div class="grid grid-cols-2 gap-3">
                 <div><label class="text-sm text-slate-400">Lease Start</label><input type="date" x-model="editTenant.lease_start_date" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1"></div>
@@ -1326,6 +1583,45 @@
         </div>
     </div>
 
+    <!-- DEPOSIT DETAIL MODAL -->
+    <div x-show="showDepositDetailModal" x-cloak class="fixed inset-0 bg-black/70 flex items-end sm:items-center justify-center z-50" @click.self="showDepositDetailModal = false">
+        <div class="bg-slate-900 rounded-t-2xl sm:rounded-xl p-5 sm:p-6 border border-slate-800 max-w-md w-full space-y-4 max-h-[92vh] overflow-y-auto">
+            <div class="flex items-center justify-between">
+                <h2 class="text-xl font-bold">Security Deposit Details</h2>
+                <button @click="showDepositDetailModal = false" class="text-slate-400 text-xl"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <template x-if="customerDetail && customerDetail.deposit">
+                <div class="space-y-4">
+                    <div class="text-sm text-slate-400" x-text="customerDetail.tenant.tenant_name + ' — ' + customerDetail.tenant.display_address"></div>
+                    <div class="grid grid-cols-3 gap-3">
+                        <div class="bg-slate-800/60 rounded-lg p-3 text-center border border-slate-700">
+                            <div class="text-xs text-slate-500">Required</div>
+                            <div class="font-bold text-lg text-slate-200" x-text="'₹' + Number(customerDetail.deposit.required).toLocaleString('en-IN')"></div>
+                        </div>
+                        <div class="bg-slate-800/60 rounded-lg p-3 text-center border border-slate-700">
+                            <div class="text-xs text-slate-500">Received</div>
+                            <div class="font-bold text-lg text-emerald-400" x-text="'₹' + Number(customerDetail.deposit.received).toLocaleString('en-IN')"></div>
+                        </div>
+                        <div class="bg-slate-800/60 rounded-lg p-3 text-center border border-slate-700">
+                            <div class="text-xs text-slate-500">Pending</div>
+                            <div class="font-bold text-lg" :class="customerDetail.deposit.pending > 0 ? 'text-rose-400' : 'text-emerald-400'" x-text="'₹' + Number(customerDetail.deposit.pending).toLocaleString('en-IN')"></div>
+                        </div>
+                    </div>
+                    <div class="flex items-center justify-between bg-slate-800/40 rounded-lg p-3">
+                        <span class="px-3 py-1 rounded-full text-xs font-bold"
+                            :class="customerDetail.deposit.status === 'Full' ? 'bg-emerald-500/20 text-emerald-400' : (customerDetail.deposit.status === 'Partial' ? 'bg-amber-500/20 text-amber-400' : 'bg-rose-500/20 text-rose-400')"
+                            x-text="customerDetail.deposit.status"></span>
+                        <span class="text-xs text-slate-500" x-text="customerDetail.deposit.status === 'Full' ? 'Fully paid' : (customerDetail.deposit.status === 'Partial' ? 'Partial payment received' : 'No payment received yet')"></span>
+                    </div>
+                    <div class="flex gap-2 mt-2">
+                        <button @click="showDepositDetailModal = false; openDepositPaymentModal()" class="flex-1 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-medium text-sm">Record Deposit Payment</button>
+                    </div>
+                </div>
+            </template>
+            <div class="flex justify-end"><button @click="showDepositDetailModal = false" class="px-4 py-2.5 bg-slate-700 rounded-lg hover:bg-slate-600">Close</button></div>
+        </div>
+    </div>
+
     <!-- VACANCY DETAIL MODAL -->
     <div x-show="showVacancyModal" x-cloak class="fixed inset-0 bg-black/70 flex items-end sm:items-center justify-center z-50">
         <div class="bg-slate-900 rounded-t-2xl sm:rounded-xl p-5 sm:p-6 border border-slate-800 max-w-2xl w-full space-y-4 max-h-[92vh] overflow-y-auto">
@@ -1432,13 +1728,16 @@
             <template x-if="kpiData && kpiType === 'tenants'">
                 <div class="space-y-2">
                     <template x-for="t in kpiData.tenants" :key="t.tenant_id">
-                        <div class="bg-slate-800/40 rounded-lg border border-slate-800 p-3 flex justify-between items-center gap-2">
+                        <div class="bg-slate-800/40 rounded-lg border border-slate-800 p-3 flex justify-between items-center gap-2 cursor-pointer hover:border-cyan-500/50 transition" @click="kpiOpenCustomer(t)" title="Open customer view">
                             <div class="min-w-0">
                                 <div class="font-semibold text-sm truncate" x-text="t.tenant_name"></div>
                                 <div class="text-xs text-slate-400 truncate" x-text="t.display_address + ' — ' + (t.apartment_name || '')"></div>
                                 <div class="text-xs text-slate-500 truncate" x-text="t.phone_number || '—'"></div>
                             </div>
-                            <span class="px-2 py-0.5 rounded text-[10px] font-bold shrink-0" :class="t.is_active === 'Y' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'" x-text="t.is_active === 'Y' ? 'Active' : 'Inactive'"></span>
+                            <div class="flex items-center gap-2 shrink-0">
+                                <button x-show="t.is_active === 'Y'" @click.stop="kpiRecordPayment(t)" class="text-indigo-400 hover:text-indigo-300 p-2 rounded-lg bg-indigo-500/10 min-w-[40px] min-h-[40px] flex items-center justify-center" title="Record payment"><i class="fa-solid fa-hand-holding-dollar text-lg"></i></button>
+                                <span class="px-2 py-0.5 rounded text-[10px] font-bold" :class="t.is_active === 'Y' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'" x-text="t.is_active === 'Y' ? 'Active' : 'Inactive'"></span>
+                            </div>
                         </div>
                     </template>
                 </div>
@@ -1448,7 +1747,7 @@
             <template x-if="kpiData && kpiType === 'outstanding'">
                 <div class="space-y-2">
                     <template x-for="l in kpiData.ledgers.filter(x => x.new_baki > 0)" :key="l.tenant_id">
-                        <div class="bg-slate-800/40 rounded-lg border border-slate-800 p-3">
+                        <div class="bg-slate-800/40 rounded-lg border border-slate-800 p-3 cursor-pointer hover:border-indigo-500/60 transition" @click="kpiRecordPayment(l)" title="Record payment">
                             <div class="flex justify-between items-center gap-2">
                                 <div class="min-w-0">
                                     <div class="font-semibold text-sm truncate" x-text="l.tenant_name"></div>
@@ -1459,9 +1758,14 @@
                                     <span class="px-2 py-0.5 rounded text-[10px] font-bold inline-block mt-0.5" :class="l.payment_status === 'Paid' ? 'bg-emerald-500/20 text-emerald-400' : l.payment_status === 'Partial' ? 'bg-amber-500/20 text-amber-400' : 'bg-rose-500/20 text-rose-400'" x-text="l.payment_status"></span>
                                 </div>
                             </div>
-                            <div class="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-[11px] text-slate-400 border-t border-slate-800 pt-2">
+                            <div class="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-[11px] text-slate-400 border-t border-slate-800 pt-2 items-center">
                                 <span>Carried fwd: <b class="text-slate-300" x-text="'₹' + Number(l.prev_baki).toLocaleString('en-IN')"></b></span>
                                 <span>Current month: <b class="text-slate-300" x-text="'₹' + Number(Math.max(0, l.new_baki - l.prev_baki)).toLocaleString('en-IN')"></b></span>
+                                <span class="ml-auto flex gap-2 text-sm">
+                                    <button @click.stop="kpiWhatsApp(l)" class="text-green-400 hover:text-green-300 p-2 rounded-lg bg-green-500/10 min-w-[40px] min-h-[40px] flex items-center justify-center" title="WhatsApp hisab"><i class="fa-brands fa-whatsapp text-lg"></i></button>
+                                    <button @click.stop="kpiSetDue(l)" class="text-sky-400 hover:text-sky-300 p-2 rounded-lg bg-sky-500/10 min-w-[40px] min-h-[40px] flex items-center justify-center" title="Set due date"><i class="fa-solid fa-calendar-check text-lg"></i></button>
+                                    <button @click.stop="kpiOpenCustomer(l)" class="text-cyan-400 hover:text-cyan-300 p-2 rounded-lg bg-cyan-500/10 min-w-[40px] min-h-[40px] flex items-center justify-center" title="Customer view"><i class="fa-solid fa-user text-lg"></i></button>
+                                </span>
                             </div>
                         </div>
                     </template>
@@ -1473,7 +1777,7 @@
             <template x-if="kpiData && kpiType === 'rent'">
                 <div class="space-y-2">
                     <template x-for="l in [...kpiData.ledgers.filter(x => x.month_total > 0)].sort((a, b) => b.month_total - a.month_total)" :key="l.tenant_id">
-                        <div class="bg-slate-800/40 rounded-lg border border-slate-800 p-3">
+                        <div class="bg-slate-800/40 rounded-lg border border-slate-800 p-3 cursor-pointer hover:border-cyan-500/50 transition" @click="kpiOpenCustomer(l)" title="Open customer view">
                             <div class="flex justify-between items-center gap-2">
                                 <div class="min-w-0">
                                     <div class="font-semibold text-sm truncate" x-text="l.tenant_name"></div>
@@ -1484,11 +1788,15 @@
                                     <div class="text-[10px] text-slate-500" x-text="'Rent ₹' + Number(l.bhadu_applied).toLocaleString('en-IN')"></div>
                                 </div>
                             </div>
-                            <div class="flex flex-wrap gap-x-3 gap-y-1 mt-2 text-[11px] text-slate-400 border-t border-slate-800 pt-2">
+                            <div class="flex flex-wrap gap-x-3 gap-y-1 mt-2 text-[11px] text-slate-400 border-t border-slate-800 pt-2 items-center">
                                 <span>Light: <b class="text-slate-300" x-text="'₹' + Number(l.light_bill).toLocaleString('en-IN')"></b></span>
                                 <span>Gas: <b class="text-slate-300" x-text="'₹' + Number(l.gas_bill).toLocaleString('en-IN')"></b></span>
                                 <span>Maint: <b class="text-slate-300" x-text="'₹' + Number(l.maintenance_applied).toLocaleString('en-IN')"></b></span>
                                 <span>Misc: <b class="text-slate-300" x-text="'₹' + Number(l.common_misc_expenses).toLocaleString('en-IN')"></b></span>
+                                <span class="ml-auto flex gap-2 text-sm">
+                                    <button x-show="l.new_baki > 0" @click.stop="kpiRecordPayment(l)" class="text-indigo-400 hover:text-indigo-300 p-2 rounded-lg bg-indigo-500/10 min-w-[40px] min-h-[40px] flex items-center justify-center" title="Record payment"><i class="fa-solid fa-hand-holding-dollar text-lg"></i></button>
+                                    <button @click.stop="kpiOpenCustomer(l)" class="text-cyan-400 hover:text-cyan-300 p-2 rounded-lg bg-cyan-500/10 min-w-[40px] min-h-[40px] flex items-center justify-center" title="Customer view"><i class="fa-solid fa-user text-lg"></i></button>
+                                </span>
                             </div>
                         </div>
                     </template>
@@ -1500,12 +1808,16 @@
             <template x-if="kpiData && kpiType === 'collected'">
                 <div class="space-y-2">
                     <template x-for="l in kpiData.ledgers.filter(x => x.jama > 0)" :key="l.tenant_id">
-                        <div class="bg-slate-800/40 rounded-lg border border-slate-800 p-3 flex justify-between items-center gap-2">
+                        <div class="bg-slate-800/40 rounded-lg border border-slate-800 p-3 flex justify-between items-center gap-2 cursor-pointer hover:border-cyan-500/50 transition" @click="kpiOpenCustomer(l)" title="Open customer view">
                             <div class="min-w-0">
                                 <div class="font-semibold text-sm truncate" x-text="l.tenant_name"></div>
                                 <div class="text-xs text-slate-400 truncate" x-text="l.display_address"></div>
                             </div>
-                            <div class="font-bold text-emerald-400 shrink-0" x-text="'₹' + Number(l.jama).toLocaleString('en-IN')"></div>
+                            <div class="flex items-center gap-2 shrink-0">
+                                <div class="font-bold text-emerald-400" x-text="'₹' + Number(l.jama).toLocaleString('en-IN')"></div>
+                                <button x-show="l.new_baki > 0" @click.stop="kpiRecordPayment(l)" class="text-indigo-400 hover:text-indigo-300 p-2 rounded-lg bg-indigo-500/10 min-w-[40px] min-h-[40px] flex items-center justify-center" title="Record payment"><i class="fa-solid fa-hand-holding-dollar text-lg"></i></button>
+                                <button @click.stop="kpiOpenCustomer(l)" class="text-cyan-400 hover:text-cyan-300 p-2 rounded-lg bg-cyan-500/10 min-w-[40px] min-h-[40px] flex items-center justify-center" title="Customer view"><i class="fa-solid fa-user text-lg"></i></button>
+                            </div>
                         </div>
                     </template>
                 </div>
@@ -1515,7 +1827,7 @@
             <template x-if="kpiData && kpiType === 'recovery'">
                 <div class="space-y-3">
                     <template x-for="p in kpiData.properties" :key="p.property_id">
-                        <div class="bg-slate-800/40 rounded-lg border border-slate-800 p-3">
+                        <div class="bg-slate-800/40 rounded-lg border border-slate-800 p-3 cursor-pointer hover:border-indigo-500/60 transition" @click="kpiPropertyLedgers(p)" title="Open month ledger for this property">
                             <div class="flex justify-between items-center gap-2">
                                 <div class="font-semibold text-sm truncate" x-text="p.apartment_name"></div>
                                 <div class="text-xs font-bold shrink-0" x-text="recoveryPct(p.collected, p.rent_billed) + '%'"></div>
@@ -1523,6 +1835,7 @@
                             <div class="w-full bg-slate-700 rounded-full h-2 mt-2">
                                 <div class="bg-emerald-500 h-2 rounded-full" :style="'width: ' + Math.min(100, recoveryPct(p.collected, p.rent_billed)) + '%'"></div>
                             </div>
+                            <div class="mt-2 pt-2 border-t border-slate-800 text-[11px] text-indigo-400"><i class="fa-solid fa-arrow-right mr-1"></i>Open month ledger for this property</div>
                         </div>
                     </template>
                 </div>
@@ -1538,10 +1851,18 @@
             <div class="flex items-center justify-between"><h2 class="text-xl font-bold">Record Payment</h2><button @click="showAddPaymentModal = false" class="text-slate-400 text-xl"><i class="fa-solid fa-xmark"></i></button></div>
             <div><label class="text-sm text-slate-400">Tenant</label><select x-model="newPayment.tenant_id" @change="onPaymentTenantChange()" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1"><template x-for="tenant in activeTenants" :key="tenant.id"><option :value="tenant.id" x-text="tenant.tenant_name + ' — ' + (tenant.display_address || '')"></option></template></select></div>
             <div class="flex justify-between items-center bg-slate-800 rounded-lg px-4 py-3 border border-slate-700">
-                <div class="text-sm text-slate-400">Outstanding Due</div>
-                <div class="text-lg font-bold" :class="selectedTenantOutstanding > 0 ? 'text-rose-400' : 'text-emerald-400'">₹<span x-text="Number(selectedTenantOutstanding).toLocaleString('en-IN')"></span></div>
+                <div class="text-sm text-slate-400" x-text="newPayment.payment_type === 'DEPOSIT' ? 'Deposit Pending' : 'Outstanding Due'"></div>
+                <div class="text-lg font-bold" :class="(newPayment.payment_type === 'DEPOSIT' ? this.depositPendingForSelected : selectedTenantOutstanding) > 0 ? 'text-rose-400' : 'text-emerald-400'">₹<span x-text="Number(newPayment.payment_type === 'DEPOSIT' ? depositPendingForSelected : selectedTenantOutstanding).toLocaleString('en-IN')"></span></div>
             </div>
-            <template x-if="selectedTenantOutstanding > 0 && newPayment.payment_type === 'RENT' && !paymentTotal"><p class="text-xs text-amber-400/80">Tip: amount pre-filled with outstanding due.</p></template>
+            <!-- Quick amount chips (RENT = outstanding, DEPOSIT = pending deposit) -->
+            <div class="flex gap-2 flex-wrap" x-show="quickChipBase > 0">
+                <button type="button" @click="applyQuickChip('full')" class="px-3 py-2 rounded-lg text-xs font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-600/40 hover:bg-emerald-500/25">
+                    <i class="fa-solid fa-check mr-1"></i>Full ₹<span x-text="Number(quickChipBase).toLocaleString('en-IN')"></span>
+                </button>
+                <button type="button" @click="applyQuickChip('half')" class="px-3 py-2 rounded-lg text-xs font-semibold bg-indigo-500/15 text-indigo-300 border border-indigo-500/40 hover:bg-indigo-500/25"><i class="fa-solid fa-divide mr-1"></i>Half</button>
+                <button type="button" @click="clearAllocations()" class="px-3 py-2 rounded-lg text-xs font-semibold bg-slate-700/60 text-slate-300 border border-slate-600 hover:bg-slate-700"><i class="fa-solid fa-eraser mr-1"></i>Clear (Custom)</button>
+            </div>
+            <template x-if="quickChipBase > 0 && newPayment.payment_type === 'RENT' && !paymentTotal"><p class="text-xs text-amber-400/80">Tip: amount pre-filled with outstanding due.</p></template>
             <div><label class="text-sm text-slate-400">Billing Month</label><input type="month" x-model="newPayment.billing_month" @change="onPaymentMonthChange()" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1"></div>
             <div><label class="text-sm text-slate-400">Payment Date</label><input type="date" x-model="newPayment.payment_date" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1"></div>
             <div class="grid grid-cols-2 gap-3">
@@ -1560,11 +1881,42 @@
                         </div>
                     </template>
                 </div>
-                <div class="text-right text-sm mt-1">Total: <span class="font-bold text-emerald-400" x-text="'₹' + paymentTotal"></span></div>
+                <div class="flex justify-between items-center text-sm mt-1">
+                    <span>Total: <span class="font-bold text-emerald-400" x-text="'₹' + paymentTotal"></span></span>
+                    <span class="text-slate-400">Balance after: <span class="font-bold" :class="rentRemainingAfter > 0 ? 'text-rose-400' : 'text-emerald-400'" x-text="(rentRemainingAfter < 0 ? '−₹' : '₹') + Number(Math.abs(rentRemainingAfter)).toLocaleString('en-IN')"></span><span x-show="rentRemainingAfter < 0" class="ml-1 text-[10px] text-slate-500">(credit)</span></span>
+                </div>
             </div>
-            <div x-show="newPayment.payment_type === 'DEPOSIT'">
-                <div><label class="text-sm text-slate-400">Billing Month</label><input type="month" x-model="newPayment.billing_month" @change="refreshPaymentOutstanding()" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1"></div>
-                <div><label class="text-sm text-slate-400">Amount (₹)</label><input type="number" x-model="newPayment.amount" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1" placeholder="3300"></div>
+
+            <!-- Inline due date for balance (RENT) -->
+            <div x-show="newPayment.payment_type === 'RENT' && rentRemainingAfter > 0" class="space-y-2">
+                <div>
+                    <label class="text-sm text-slate-400">Set due date for balance ₹<span x-text="Number(rentRemainingAfter).toLocaleString('en-IN')"></span> (optional)</label>
+                    <input type="date" x-model="newPayment.due_date" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1">
+                </div>
+                <template x-if="paymentReminderPreview">
+                    <div class="bg-slate-800/60 border border-slate-700 rounded-lg p-3 text-xs whitespace-pre-line text-slate-300 leading-relaxed">
+                        <div class="text-[10px] font-bold text-indigo-400 uppercase tracking-wide mb-1"><i class="fa-brands fa-whatsapp mr-1"></i>Reminder preview</div>
+                        <span x-text="paymentReminderPreview"></span>
+                    </div>
+                </template>
+            </div>
+            <div x-show="newPayment.payment_type === 'DEPOSIT'" class="space-y-2">
+                <div><label class="text-sm text-slate-400">Amount (₹)</label><input type="number" inputmode="decimal" min="0" x-model.number="newPayment.amount" @input="paymentUserEdited = true" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1" placeholder="Deposit amount"></div>
+                <div class="flex justify-between items-center text-sm bg-slate-800/60 rounded-lg px-3 py-2">
+                    <span class="text-slate-400">Pending after this payment:</span>
+                    <span class="font-bold" :class="depositRemainingAfter > 0 ? 'text-rose-400' : 'text-emerald-400'" x-text="(depositRemainingAfter < 0 ? '−₹' : '₹') + Number(Math.abs(depositRemainingAfter)).toLocaleString('en-IN')"></span><span x-show="depositRemainingAfter < 0" class="ml-1 text-[10px] text-slate-500">(credit)</span>
+                </div>
+                <!-- Inline due date for deposit balance -->
+                <div x-show="depositRemainingAfter > 0">
+                    <label class="text-sm text-slate-400">Set due date for balance ₹<span x-text="Number(depositRemainingAfter).toLocaleString('en-IN')"></span> (optional)</label>
+                    <input type="date" x-model="newPayment.due_date" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1">
+                </div>
+                <template x-if="newPayment.payment_type === 'DEPOSIT' && paymentReminderPreview">
+                    <div class="bg-slate-800/60 border border-slate-700 rounded-lg p-3 text-xs whitespace-pre-line text-slate-300 leading-relaxed">
+                        <div class="text-[10px] font-bold text-green-400 uppercase tracking-wide mb-1"><i class="fa-brands fa-whatsapp mr-1"></i>Reminder preview</div>
+                        <span x-text="paymentReminderPreview"></span>
+                    </div>
+                </template>
             </div>
             <div><label class="text-sm text-slate-400">Note (optional)</label><input type="text" x-model="newPayment.note" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1" placeholder="e.g. 2 months advance"></div>
             <p class="text-sm text-rose-400" x-show="paymentError" x-text="paymentError"></p>
@@ -1677,12 +2029,55 @@
     <div x-show="showReminderModal" x-cloak class="fixed inset-0 bg-black/70 flex items-end sm:items-center justify-center z-50">
         <div class="bg-slate-900 rounded-t-2xl sm:rounded-xl p-5 sm:p-6 border border-slate-800 max-w-md w-full space-y-4 max-h-[92vh] overflow-y-auto">
             <div class="flex items-center justify-between"><h2 class="text-xl font-bold" x-text="reminderForm.id ? 'Edit Due Date' : 'Set New Due Date'"></h2><button @click="showReminderModal = false" class="text-slate-400 text-xl"><i class="fa-solid fa-xmark"></i></button></div>
-            <div><label class="text-sm text-slate-400">Tenant</label><select x-model="reminderForm.tenant_id" @change="onReminderTenantChange()" :disabled="!!reminderForm.id" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1"><option value="">— Select tenant —</option><template x-for="t in reminderEligibleTenants" :key="t.id"><option :value="t.id" x-text="(t.display_address || '') + ' — ' + t.tenant_name + (t.active_reminder_date ? ' (current: ' + t.active_reminder_date + ')' : '')"></option></template></select><p x-show="!reminderForm.id && !reminderEligibleTenants.length" class="text-xs text-amber-400 mt-1">No tenants with outstanding balance for this billing month.</p></div>
-            <div><label class="text-sm text-slate-400">Billing Month</label><input type="month" x-model="reminderForm.billing_month" :disabled="!!reminderForm.id" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1"></div>
+
+            <!-- Type selector -->
+            <div x-show="!reminderForm.id">
+                <label class="text-sm text-slate-400">Reminder Type</label>
+                <div class="grid grid-cols-2 gap-2 mt-1">
+                    <button type="button" @click="reminderForm.rem_type = 'rent'; onRemTypeChange()" class="px-4 py-3 rounded-lg font-medium text-sm transition"
+                        :class="reminderForm.rem_type !== 'deposit' ? 'bg-indigo-600 text-white border-indigo-500' : 'bg-slate-800 text-slate-400 border-slate-700'" style="border-width:1px">
+                        <i class="fa-solid fa-home mr-1"></i> Rent Due
+                    </button>
+                    <button type="button" @click="reminderForm.rem_type = 'deposit'; onRemTypeChange()" class="px-4 py-3 rounded-lg font-medium text-sm transition"
+                        :class="reminderForm.rem_type === 'deposit' ? 'bg-purple-600 text-white border-purple-500' : 'bg-slate-800 text-slate-400 border-slate-700'" style="border-width:1px">
+                        <i class="fa-solid fa-shield-halved mr-1"></i> Security Deposit
+                    </button>
+                </div>
+            </div>
+
+            <!-- Tenant (editable for new, disabled display for edit) -->
+            <div>
+                <label class="text-sm text-slate-400">Tenant</label>
+                <template x-if="!reminderForm.id">
+                    <select x-model="reminderForm.tenant_id" @change="onReminderTenantChange()" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1">
+                        <option value="">— Select tenant —</option>
+                        <template x-for="t in reminderEligibleTenants" :key="t.id">
+                            <option :value="t.id" x-text="(t.display_address || '') + ' — ' + t.tenant_name + (t.active_reminder_date ? ' (current: ' + t.active_reminder_date + ')' : '')"></option>
+                        </template>
+                    </select>
+                </template>
+                <template x-if="reminderForm.id">
+                    <input type="text" :value="reminderTenantName(reminderForm.tenant_id)" disabled class="w-full bg-slate-800/60 border border-slate-700 rounded p-3 mt-1 opacity-70 cursor-not-allowed">
+                </template>
+            </div>
+
+            <!-- Billing Month (disabled in edit mode, shown as read-only) -->
+            <div>
+                <label class="text-sm text-slate-400">Billing Month</label>
+                <input type="month" x-model="reminderForm.billing_month" :disabled="!!reminderForm.id" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1" :class="{'opacity-70 cursor-not-allowed': !!reminderForm.id}">
+            </div>
+
             <div><label class="text-sm text-slate-400">Next Due Date</label><input type="date" x-model="reminderForm.reminder_date" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1"></div>
-            <div><label class="text-sm text-slate-400">Amount to be paid (Rs.)</label><input type="number" x-model="reminderForm.amount_due" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1" :placeholder="'Auto: Rs. ' + (reminderForm.outstanding || 0)"><p class="text-xs text-slate-500 mt-1">Leave blank to auto-fill the month's outstanding balance (Rs. <span x-text="fmtNum(reminderForm.outstanding)"></span>).</p></div>
+            <div><label class="text-sm text-slate-400" x-text="reminderForm.rem_type === 'deposit' ? 'Remaining Deposit (Rs.)' : 'Amount to be paid (Rs.)'"></label><input type="number" inputmode="decimal" min="0" x-model.number="reminderForm.amount_due" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1" :placeholder="'Auto: Rs. ' + fmtNum(reminderForm.outstanding || 0)"><p class="text-xs text-slate-500 mt-1" x-text="reminderForm.rem_type === 'deposit' ? 'Pending deposit amount after booking deduction.' : 'Leave blank to auto-fill the month outstanding balance.'"></p></div>
             <div><label class="text-sm text-slate-400">Note</label><input type="text" x-model="reminderForm.note" class="w-full bg-slate-800 border border-slate-700 rounded p-3 mt-1" placeholder="e.g. will clear after getting salary"></div>
-            <p x-show="reminderPreview" class="text-xs bg-slate-800 rounded-lg p-3 border border-slate-700 whitespace-pre-wrap text-slate-300"><span class="text-slate-500">Message that will be sent:</span>\n<span x-text="reminderPreview"></span></p>
+
+            <!-- Reminder message preview (type-aware) -->
+            <template x-if="reminderPreviewText">
+                <div class="bg-slate-800/60 border border-slate-700 rounded-lg p-3 text-xs whitespace-pre-line text-slate-300 leading-relaxed">
+                    <div class="text-[10px] font-bold uppercase tracking-wide mb-1" :class="reminderForm.rem_type === 'deposit' ? 'text-green-400' : 'text-indigo-400'"><i class="fa-brands fa-whatsapp mr-1"></i>WhatsApp message preview</div>
+                    <span x-text="reminderPreviewText"></span>
+                </div>
+            </template>
             <p x-show="reminderError" class="text-xs text-rose-400" x-text="reminderError"></p>
             <div class="flex gap-2 mt-4">
                 <button @click="showReminderModal = false" class="flex-1 px-4 py-3 bg-slate-700 rounded-lg hover:bg-slate-600">Cancel</button>
@@ -1781,11 +2176,13 @@
                 },
                 get filteredLedgers() {
                     const q = (this.ledgerSearch || '').trim().toLowerCase();
+                    const queryTokens = this.tokenizeSearch(q);
                     let rows = this.ledgers.filter(l => {
                         if (this.ledgerPropertyFilter && String(l.property_id) !== String(this.ledgerPropertyFilter)) return false;
                         if (q) {
                             const hay = ((l.tenant_name || '') + ' ' + (l.display_address || '') + ' ' + (l.apartment_name || '')).toLowerCase();
-                            if (!hay.includes(q)) return false;
+                            const hayTokens = this.tokenizeSearch(hay);
+                            if (!this.matchTokens(queryTokens, hayTokens)) return false;
                         }
                         return true;
                     });
@@ -1817,11 +2214,123 @@
                     }
                     return 0;
                 },
+                get filteredTenants() {
+                    const q = (this.tenantSearch || '').trim().toLowerCase();
+                    const queryTokens = this.tokenizeSearch(q);
+                    let rows = this.tenants.filter(t => {
+                        if (this.tenantStatusFilter && t.is_active !== this.tenantStatusFilter) return false;
+                        if (q) {
+                            // Only search in name, address, and apartment - not phone number
+                            const hay = ((t.tenant_name || '') + ' ' + (t.display_address || '') + ' ' + (t.apartment_name || '')).toLowerCase();
+                            const hayTokens = this.tokenizeSearch(hay);
+                            if (!this.matchTokens(queryTokens, hayTokens)) return false;
+                        }
+                        return true;
+                    });
+                    return rows;
+                },
+                get filteredCustomers() {
+                    const q = (this.customerSearch || '').trim().toLowerCase();
+                    const queryTokens = this.tokenizeSearch(q);
+                    let rows = this.customers.filter(t => {
+                        if (q) {
+                            // Only search in name, address, and apartment - not phone number
+                            // (phone matches would trigger false auto-selects on single hit)
+                            const hay = ((t.tenant_name || '') + ' ' + (t.display_address || '') + ' ' + (t.apartment_name || '')).toLowerCase();
+                            const hayTokens = this.tokenizeSearch(hay);
+                            if (!this.matchTokens(queryTokens, hayTokens)) return false;
+                        }
+                        return true;
+                    });
+                    return rows;
+                },
+                tokenizeSearch(s) {
+                    return s.split(/[\s\/\\\-_]+/).filter(t => t.length > 0);
+                },
+                matchTokens(queryTokens, hayTokens) {
+                    if (queryTokens.length === 0) return true;
+                    return queryTokens.every(qt => hayTokens.some(ht => ht.includes(qt) || ht === qt));
+                },
+                calcPendingDeposit() {
+                    const required = Number(this.newTenant.security_deposit_applied) || 0;
+                    const paid = Number(this.newTenant.booking_amount_paid) || 0;
+                    this.pendingSecurityDeposit = Math.max(0, required - paid);
+                },
+                openDialer(phone) {
+                    if (!phone) return;
+                    const clean = String(phone).replace(/[^0-9+]/g, '');
+                    window.open('tel:' + clean, '_self');
+                },
+                openBlankWhatsApp(phone) {
+                    if (!phone) return;
+                    let clean = String(phone).replace(/[^0-9]/g, '');
+                    if (clean.startsWith('91')) clean = clean.slice(2);
+                    window.open('https://wa.me/91' + clean, '_blank');
+                },
+                openCustomerPaymentModal() {
+                    this.openAddPaymentModal(this.customerSel);
+                },
+                openDepositDetailModal() {
+                    if (!this.customerDetail || !this.customerDetail.deposit) return;
+                    this.showDepositDetailModal = true;
+                },
+                get pendingSecurityDeposit() {
+                    const required = Number(this.newTenant.security_deposit_applied) || 0;
+                    const paid = Number(this.newTenant.booking_amount_paid) || 0;
+                    return Math.max(0, required - paid);
+                },
+                kpiLedger(l) {
+                    return { ...l, billing_month: this.kpiData ? this.kpiData.execution_month : this.currentBillingPeriod() };
+                },
+                kpiRecordPayment(t) {
+                    const tid = t.tenant_id || t.id;
+                    this._navKeepStack = true;
+                    this.showKpiModal = false;
+                    this.openAddPaymentModal(tid);
+                },
+                kpiOpenCustomer(t) {
+                    const led = this.kpiLedger(t);
+                    this._navKeepStack = true;
+                    this.showKpiModal = false;
+                    this.openCustomerFromLedger(led);
+                },
+                kpiWhatsApp(l) {
+                    const led = this.kpiLedger(l);
+                    this._navKeepStack = true;
+                    this.showKpiModal = false;
+                    this.openWhatsAppForLedger(led);
+                },
+                kpiSetDue(l) {
+                    const led = this.kpiLedger(l);
+                    this._navKeepStack = true;
+                    this.showKpiModal = false;
+                    this.openSetReminderFromLedger(led);
+                },
+                kpiPropertyLedgers(p) {
+                    this._navKeepStack = true;
+                    this.showKpiModal = false;
+                    this.ledgerSubTab = 'ledger';
+                    this.ledgerPropertyFilter = String(p.property_id);
+                    this.ledgerSearch = '';
+                    this.currentTab = 'ledgers';
+                },
                 showEditLedgerModal: false,
                 editLedger: {},
                 editLedgerError: '',
                 showAddTenantModal: false,
+                vacantRooms: [],
+                selectedPropertyDefaults: null,
+                pendingSecurityDeposit: 0,
+                editDepositPending: 0,
+                _kpiCache: null,
+                ledgerCurrentPage: 1,
+                paymentCurrentPage: 1,
+                showGoToTop: false,
                 showEditTenantModal: false,
+                tenantCurrentPage: 1,
+                tenantSearch: '',
+                tenantStatusFilter: '',
+                itemsPerPage: 15,
                 editTenant: {},
                 tenantEditError: '',
                 showAddExpenseModal: false,
@@ -1833,10 +2342,11 @@
                 showAllocationModal: false,
                 allocationReport: {},
                 allocationRunning: false,
-                newTenant: { room_id: 1, tenant_name: '', phone_number: '', base_rent_applied: 3300, maintenance_applied: 0, security_deposit_applied: 5000, lease_start_date: '', lease_end_date: '' },
+                newTenant: { room_id: 1, tenant_name: '', phone_number: '', base_rent_applied: 3300, maintenance_applied: 0, security_deposit_applied: 5000, booking_amount_paid: 0, pending_deposit_due_date: '', lease_start_date: '', lease_end_date: '' },
                 newExpense: { id: null, master_id: 1, expense_name: '', amount: 0, charge_type: 'SHARED', room_id: null, execution_month: '' },
                 expenseError: '',
-                newPayment: { tenant_id: 1, billing_month: '', payment_date: '', amount: 0, payment_mode: 'CASH', payment_type: 'RENT', note: '', outstanding: 0, allocations: [{ billing_month: '', amount: 0 }] },
+                _noteAutoSet: false,
+                newPayment: { tenant_id: 1, billing_month: '', payment_date: '', amount: 0, payment_mode: 'CASH', payment_type: 'RENT', note: '', outstanding: 0, due_date: '', allocations: [{ billing_month: '', amount: 0 }] },
                 paymentUserEdited: false,
                 paymentError: '',
                 newProperty: { apartment_name: '', plot_number: '', default_base_rent: 3300, default_maintenance_fee: 0, default_security_deposit: 5000, default_common_utility: 0 },
@@ -1850,10 +2360,20 @@
                 expenseTotals: [],
                 customers: [],
                 customerSel: '',
+                customerSearch: '',
                 customerYear: new Date().getFullYear(),
                 customerDetail: null,
                 customerMonth: {},
+                netLoading: {},
+                netError: {},
+                depositSearch: '',
+                depositSort: 'pending-desc',
+                toasts: [],
+                _toastSeq: 0,
                 showCustomerMonthModal: false,
+                showDepositDetailModal: false,
+                pendingSecurityDeposit: 0,
+                _kpiCache: null,
                 showVacancyModal: false,
                 vacancyDetail: { vacant_properties: [], vacant_count: 0, upcoming_properties: [], upcoming_count: 0, upcoming_days: 120 },
                 showKpiModal: false,
@@ -1878,28 +2398,193 @@
                 qrClean: false,
                 qrUrl: '',
                 qrHint: '',
-                remindersMonth: (() => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth() - 1, 1).getFullYear() + '-' + String(new Date(d.getFullYear(), d.getMonth() - 1, 1).getMonth() + 1).padStart(2, '0'); })(),
+                remindersMonth: (() => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'); })(),
                 reminders: [],
                 reminderEligibleTenants: [],
                 reminderSchedule: { send_time: '10:00', enabled: true },
                 showReminderModal: false,
-                reminderForm: { id: null, tenant_id: '', billing_month: '', reminder_date: '', amount_due: null, outstanding: 0, note: '' },
+                reminderForm: { id: null, tenant_id: '', billing_month: '', reminder_date: '', amount_due: null, outstanding: 0, note: '', rem_type: 'rent' },
+                get reminderPreviewText() {
+                    const f = this.reminderForm;
+                    if (!f.reminder_date || !f.tenant_id) return '';
+                    const t = this.reminderEligibleTenants.find(x => Number(x.id) === Number(f.tenant_id)) ||
+                              this.tenants.find(x => Number(x.id) === Number(f.tenant_id));
+                    const amt = (f.amount_due !== null && f.amount_due !== '') ? f.amount_due : (f.outstanding || 0);
+                    const nm = ((t && t.display_address) ? t.display_address + '\u2014' : '') + (t ? t.tenant_name : '');
+                    if (f.rem_type === 'deposit') {
+                        return 'SECURITY DEPOSIT REMINDER\n' + nm +
+                               '\nYour deposit due date is : ' + f.reminder_date +
+                               '\nRemaining deposit to be paid : Rs. ' + Number(amt).toLocaleString('en-IN');
+                    }
+                    return nm + '\nYour New Next Due Date is : ' + f.reminder_date +
+                           '\nAmount to be paid : Rs. ' + Number(amt).toLocaleString('en-IN');
+                },
+                reminderTenantName(tid) {
+                    const t = this.tenants.find(x => Number(x.id) === Number(tid)) ||
+                              this.reminderEligibleTenants.find(x => Number(x.id) === Number(tid));
+                    return t ? ((t.display_address ? t.display_address + ' \u2014 ' : '') + t.tenant_name) : ('Tenant #' + tid);
+                },
+                onRemTypeChange() {
+                    if (this.reminderForm.rem_type === 'deposit') {
+                        // Auto-fill from deposit pending if available
+                        const dep = this.deposits.find(x => Number(x.tenant_id) === Number(this.reminderForm.tenant_id));
+                        if (dep && !this.reminderForm.amount_due) {
+                            this.reminderForm.amount_due = Math.max(0, (Number(dep.required_deposit)||0) - (Number(dep.deposit_received)||0));
+                        }
+                        if (!this.reminderForm.note) this.reminderForm.note = 'Deposit due';
+                    }
+                },
                 reminderError: '',
                 dueRemindersRunning: false,
                 showReminderLogModal: false,
+                gasReports: { csvExists: false, xlsxExists: false },
                 reminderLog: [],
                 reminderLogSummary: {},
                 reminderLogBatch: null,
+                get anyModalOpen() {
+                    return this.showAddTenantModal || this.showEditTenantModal || this.showAddPropertyModal ||
+                        this.showEditPropertyModal || this.showAddRoomModal || this.showEditRoomModal ||
+                        this.showAddExpenseModal || this.showAllocationModal || this.showEditLedgerModal ||
+                        this.showCustomerMonthModal || this.showDepositDetailModal || this.showVacancyModal || this.showKpiModal ||
+                        this.showAddPaymentModal || this.showTemplateModal || this.showMappingModal ||
+                        this.showSendLogModal || this.showQrModal || this.showReminderModal || this.showReminderLogModal;
+                },
+                closeTopModal() {
+                    if (this.showQrModal) { this.closeQrModal(); return; }
+                    if (this.drawerOpen) { this.drawerOpen = false; return; }
+                    const flags = ['showReminderLogModal', 'showReminderModal', 'showSendLogModal',
+                        'showMappingModal', 'showTemplateModal', 'showAddPaymentModal', 'showDepositDetailModal', 'showKpiModal', 'showVacancyModal',
+                        'showCustomerMonthModal', 'showEditLedgerModal', 'showAllocationModal', 'showAddExpenseModal',
+                        'showEditRoomModal', 'showAddRoomModal', 'showEditPropertyModal', 'showAddPropertyModal',
+                        'showEditTenantModal', 'showAddTenantModal'];
+                    for (const f of flags) {
+                        if (this[f]) { this[f] = false; return; }
+                    }
+                },
+                _modalFlags: ['showAddTenantModal', 'showEditTenantModal', 'showAddPropertyModal', 'showEditPropertyModal',
+                    'showAddRoomModal', 'showEditRoomModal', 'showAddExpenseModal', 'showAllocationModal', 'showEditLedgerModal',
+                    'showCustomerMonthModal', 'showVacancyModal', 'showKpiModal', 'showAddPaymentModal', 'showDepositDetailModal', 'showTemplateModal',
+                    'showMappingModal', 'showSendLogModal', 'showQrModal', 'showReminderModal', 'showReminderLogModal'],
+                _navBusy: false,
+                _pendingUnwind: null,
+                _navKeepStack: false,
+                _historyOk: true,
+                _safeHistory(fn) {
+                    if (!this._historyOk) return;
+                    try { fn(); } catch (e) {
+                        this._historyOk = false;
+                        console.warn('History API unavailable; back-button sync disabled.', e);
+                    }
+                },
+                _openModalNav(f) {
+                    if (!this._historyOk) return;
+                    if (this._navKeepStack) {
+                        this._navKeepStack = false;
+                        if (!(history.state && history.state.modal === f)) {
+                            this._safeHistory(() => history.pushState({ modal: f }, '', '#m=' + f));
+                        }
+                        return;
+                    }
+                    if (this._pendingUnwind) {
+                        this._pendingUnwind = null;
+                        this._safeHistory(() => history.replaceState({ modal: f }, '', '#m=' + f));
+                        return;
+                    }
+                    if (!(history.state && history.state.modal)) {
+                        this._safeHistory(() => history.pushState({ modal: f }, '', '#m=' + f));
+                    }
+                },
+                _closeModalNav(f) {
+                    if (!this._historyOk) return;
+                    if (history.state && history.state.modal === f) {
+                        if (this._navKeepStack) return;
+                        this._pendingUnwind = f;
+                        setTimeout(() => {
+                            if (this._pendingUnwind === f) {
+                                this._pendingUnwind = null;
+                                this._safeHistory(() => history.back());
+                            }
+                        }, 0);
+                    }
+                },
+                initNav() {
+                    const knownTabs = this.navItems.map(x => x.id);
+                    const h = location.hash.replace(/^#/, '');
+                    let startTab = this.currentTab;
+                    if (h && knownTabs.includes(h)) startTab = h;
+                    this.currentTab = startTab;
+                    this._safeHistory(() => history.replaceState({ tab: startTab }, '', '#' + startTab));
+
+                    this.$watch('currentTab', (t) => {
+                        if (this._navBusy) return;
+                        if (!this._historyOk) return;
+                        if (history.state && history.state.tab === t && !history.state.modal) return;
+                        this._safeHistory(() => history.pushState({ tab: t }, '', '#' + t));
+                        if (t === 'ledgers') this.fetchLedgers();
+                        else if (t === 'tenants') this.fetchTenants();
+                        else if (t === 'customers') this.fetchCustomers();
+                        else if (t === 'properties') this.fetchProperties();
+                        else if (t === 'expenses') this.fetchExpenseMeta();
+                        else if (t === 'payments') this.fetchDeposits();
+                        else if (t === 'templates') this.fetchTemplates();
+                        else if (t === 'reminders') this.fetchReminders();
+                    });
+
+                    this._modalFlags.forEach((f) => this.$watch(f, (v) => {
+                        if (v) this._openModalNav(f); else this._closeModalNav(f);
+                    }));
+
+                    window.addEventListener('popstate', (e) => {
+                        const st = e.state || {};
+                        if (st.modal) {
+                            // Restore the modal recorded in the entry we landed on.
+                            // Close only modals stacked ABOVE it (higher priority in _modalFlags).
+                            const targetIdx = this._modalFlags.indexOf(st.modal);
+                            if (targetIdx >= 0) {
+                                for (let i = this._modalFlags.length - 1; i > targetIdx; i--) {
+                                    const fm = this._modalFlags[i];
+                                    if (this[fm]) this[fm] = false;
+                                }
+                            } else {
+                                let guard = 0;
+                                while (this.anyModalOpen && guard++ < 25) this.closeTopModal();
+                            }
+                            if (!this[st.modal]) {
+                                if (st.modal === 'showQrModal') this.openQrModal();
+                                else this[st.modal] = true;
+                            }
+                            if (st.modal === 'showKpiModal' && this.kpiType) {
+                                fetch('/api/dashboard/kpi').then(r => r.json()).then(d => { this.kpiData = d; }).catch(() => {});
+                            }
+                            return;
+                        }
+                        // Plain tab / initial entry: close overlays, then walk tabs back.
+                        if (this.drawerOpen) this.drawerOpen = false;
+                        let guard = 0;
+                        while (this.anyModalOpen && guard++ < 25) this.closeTopModal();
+                        if (st.tab && st.tab !== this.currentTab) {
+                            this._navBusy = true;
+                            this.currentTab = st.tab;
+                            this._navBusy = false;
+                        }
+                    });
+                },
+                get customerYearOptions() {
+                    const now = new Date().getFullYear();
+                    const years = new Set([now, now - 1, now - 2]);
+                    (this.ledgerMonths || []).forEach(m => years.add(Number(String(m).slice(0, 4))));
+                    return [...years].sort((a, b) => b - a);
+                },
+                get depositPendingForSelected() {
+                    const d = this.deposits.find(x => Number(x.tenant_id) === Number(this.newPayment.tenant_id));
+                    if (!d) return 0;
+                    return Math.max(0, (Number(d.required_deposit) || 0) - (Number(d.deposit_received) || 0));
+                },
                 get activeReminderCount() {
                     return this.reminders.filter(r => r.status === 'ACTIVE').length;
                 },
                 get reminderPreview() {
-                    const f = this.reminderForm;
-                    const t = this.reminderEligibleTenants.find(x => Number(x.id) === Number(f.tenant_id));
-                    if (!f.reminder_date || !t) return '';
-                    const amount = (f.amount_due !== null && f.amount_due !== '') ? f.amount_due : f.outstanding;
-                    const nm = (t.display_address ? t.display_address + ' — ' : '') + t.tenant_name;
-                    return nm + '\nYour New Next Due Date is : ' + f.reminder_date + '\nAmount to be paid : Rs. ' + (amount || 0);
+                    return this.reminderPreviewText;
                 },
                 get allocationFailures() {
                     return (this.allocationReport.failures) || [];
@@ -1919,6 +2604,12 @@
                 },
                 get activeTenants() {
                     return this.tenants.filter(t => t.is_active === 'Y');
+                },
+                goToTop() {
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                },
+                onScroll() {
+                    this.showGoToTop = window.scrollY > 200;
                 },
                 get selectedTenantOutstanding() {
                     return Number(this.newPayment.outstanding) || 0;
@@ -1943,11 +2634,24 @@
                     this.refreshPaymentOutstanding();
                 },
                 onPaymentTypeChange() {
-                    if (this.newPayment.payment_type === 'RENT') {
+                    const toDeposit = this.newPayment.payment_type === 'DEPOSIT';
+                    // Keep the auto-note in sync when the user flips type
+                    if (toDeposit) {
+                        this.refreshDepositPending();
+                        if (!this.newPayment.note || this._noteAutoSet) {
+                            this.newPayment.note = 'Security deposit payment';
+                            this._noteAutoSet = true;
+                        }
+                    } else {
+                        if (this._noteAutoSet) {
+                            this.newPayment.note = '';
+                            this._noteAutoSet = false;
+                        }
                         this.paymentUserEdited = false;
                         this.refreshPaymentOutstanding();
                     }
                 },
+                async refreshDepositPending() { /* depositPendingForSelected reads this.deposits live */ },
                 onPaymentMonthChange() {
                     this.paymentUserEdited = false;
                     if (this.newPayment.payment_type === 'RENT' && this.newPayment.allocations.length === 1) {
@@ -1964,8 +2668,21 @@
                 get monthOptions() {
                     const opts = [];
                     const now = new Date();
-                    for (let i = 11; i >= 0; i--) {
+                    // Past 6 months
+                    for (let i = 6; i >= 1; i--) {
                         const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+                        const value = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+                        const label = d.toLocaleString('en-US', { month: 'long', year: 'numeric' });
+                        opts.push({ value, label });
+                    }
+                    // Current month
+                    const cm = new Date(now.getFullYear(), now.getMonth(), 1);
+                    const cValue = cm.getFullYear() + '-' + String(cm.getMonth() + 1).padStart(2, '0');
+                    const cLabel = cm.toLocaleString('en-US', { month: 'long', year: 'numeric' });
+                    opts.push({ value: cValue, label: cLabel });
+                    // Next 12 months (future due dates for security deposit etc.)
+                    for (let i = 1; i <= 12; i++) {
+                        const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
                         const value = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
                         const label = d.toLocaleString('en-US', { month: 'long', year: 'numeric' });
                         opts.push({ value, label });
@@ -1983,13 +2700,16 @@
                     return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
                 },
                 async initData() {
+                    this.initNav();
+                    // Prefetch KPI payload so first card-tap paints instantly
+                    this.api('/api/dashboard/kpi').then(d => { this.kpiData = d; this._kpiCache = d; }).catch(() => {});
                     this.fetchStats();
                     this.fetchTenants();
                     this.fetchLedgers();
                     this.fetchLedgerMonths();
                     this.fetchRooms();
+                    this.fetchVacantRooms();
                     this.fetchProperties();
-                    this.fetchExpenses();
                     this.fetchExpenseMeta();
                     this.fetchPayments();
                     this.fetchDeposits();
@@ -1997,6 +2717,28 @@
                     this.fetchTemplates();
                     this.fetchReminders();
                     this.fetchReminderSchedule();
+                    this.fetchGasReports();
+                    // Watch for tab changes to refresh reminders
+                    this.$watch('currentTab', (val) => {
+                        if (val === 'reminders') this.fetchReminders();
+                    });
+                    // Watch for tenant search/filter changes
+                    this.$watch('tenantSearch', () => { this.tenantCurrentPage = 1; });
+                    this.$watch('tenantStatusFilter', () => { this.tenantCurrentPage = 1; });
+                    // Ledger / payment filter resets
+                    this.$watch('ledgerSearch', () => { this.ledgerCurrentPage = 1; this.paymentCurrentPage = 1; });
+                    this.$watch('ledgerPropertyFilter', () => { this.ledgerCurrentPage = 1; this.paymentCurrentPage = 1; });
+                    this.$watch('ledgerSort', () => { this.ledgerCurrentPage = 1; });
+                    window.addEventListener('scroll', () => this.onScroll(), { passive: true });
+                    document.documentElement.addEventListener('scroll', () => this.onScroll(), { passive: true });
+                    // Watch for customer search changes
+                    this.$watch('customerSearch', (val) => {
+                        const matches = this.filteredCustomers;
+                        if (matches.length === 1 && val.trim()) {
+                            this.customerSel = String(matches[0].id);
+                            this.onCustomerChange();
+                        }
+                    });
                 },
                 async fetchStats() {
                     const res = await fetch('/api/dashboard/stats');
@@ -2008,24 +2750,57 @@
                     const res = await fetch('/api/dashboard/vacancy');
                     this.vacancyDetail = await res.json();
                 },
-                occupyVacantUnit(u, prop) {
+                async occupyVacantUnit(u, prop) {
                     this.showVacancyModal = false;
-                    if (!this.rooms.length) this.fetchRooms();
-                    const room = this.rooms.find(r => r.id === u.room_id);
-                    const defaults = room && room.default_base_rent != null
-                        ? room
-                        : (this.properties.find(p => p.id === prop.property_id) || {});
+                    if (!this.vacantRooms.length) { try { await this.fetchVacantRooms(); } catch (e) {} }
+                    // Locate the same unit inside the smart-selector data (has property defaults)
+                    let selProp = null, selRoom = null;
+                    for (const pr of this.vacantRooms) {
+                        const rm = (pr.rooms || []).find(x => Number(x.id) === Number(u.room_id));
+                        if (rm) { selProp = pr; selRoom = rm; break; }
+                    }
+                    const d = selProp || {};
                     this.newTenant = {
                         room_id: u.room_id,
-                        tenant_name: '',
-                        phone_number: '',
-                        base_rent_applied: defaults.default_base_rent != null ? defaults.default_base_rent : 3300,
-                        maintenance_applied: defaults.default_maintenance_fee != null ? defaults.default_maintenance_fee : 0,
-                        security_deposit_applied: defaults.default_security_deposit != null ? defaults.default_security_deposit : 5000,
+                        tenant_name: '', phone_number: '',
+                        base_rent_applied: d.default_base_rent != null ? d.default_base_rent : 3300,
+                        maintenance_applied: d.default_maintenance_fee != null ? d.default_maintenance_fee : 0,
+                        security_deposit_applied: d.default_security_deposit != null ? d.default_security_deposit : 5000,
+                        booking_amount_paid: 0, pending_deposit_due_date: '',
                         lease_start_date: new Date().toISOString().slice(0, 10),
                         lease_end_date: ''
                     };
+                    if (selProp && selRoom) {
+                        this.onRoomSelect(selRoom, selProp);
+                        if (this.selectedPropertyDefaults) {
+                            this.loadPropertyDefaults(this.selectedPropertyDefaults);
+                            this._defaultsAutoLoaded = true;
+                        }
+                    } else {
+                        this.selectedPropertyDefaults = null;
+                    }
                     this.showAddTenantModal = true;
+                    this.$nextTick(() => setTimeout(() => this.scrollToSelectedUnit(), 400));
+                },
+                scrollToSelectedUnit() {
+                    const modal = document.querySelector('[x-show="showAddTenantModal"]');
+                    if (!modal) return;
+                    const checked = [...modal.querySelectorAll('input[type=radio]')].find(r => r.checked);
+                    if (!checked) return;
+                    checked.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    const label = checked.closest('label');
+                    if (label) {
+                        label.classList.add('ring-2','ring-indigo-400');
+                        setTimeout(() => label.classList.remove('ring-2','ring-indigo-400'), 2000);
+                    }
+                },
+                get tenantDepositReminderPreview() {
+                    const nt = this.newTenant;
+                    if (!nt.pending_deposit_due_date || !(Number(this.pendingSecurityDeposit) > 0)) return '';
+                    const nm = ((nt.tenant_name || 'New tenant')) ;
+                    return 'SECURITY DEPOSIT REMINDER\n' + nm +
+                           '\nYour deposit due date is : ' + nt.pending_deposit_due_date +
+                           '\nRemaining deposit to be paid : Rs. ' + Number(this.pendingSecurityDeposit).toLocaleString('en-IN');
                 },
                 async openKpiModal(type) {
                     this.showKpiModal = true;
@@ -2038,9 +2813,16 @@
                         collected: 'Collections Breakdown',
                         recovery: 'Recovery Rate by Property'
                     }[type] || 'Details';
-                    this.kpiData = null;
-                    const res = await fetch('/api/dashboard/kpi');
-                    this.kpiData = await res.json();
+                    // Instant paint from prefetch cache; silent refresh behind it
+                    if (this._kpiCache) this.kpiData = this._kpiCache;
+                    else this.kpiData = null;
+                    try {
+                        const d = await this.api('/api/dashboard/kpi');
+                        this.kpiData = d;
+                        this._kpiCache = d;
+                    } catch (e) {
+                        if (!this._kpiCache) { this.toast(e.message || 'Failed to load details.', 'error'); this.showKpiModal = false; }
+                    }
                 },
                 recoveryPct(collected, billed) {
                     return billed ? Math.round(collected / billed * 100) : 0;
@@ -2068,6 +2850,147 @@
                 async fetchRooms() {
                     const res = await fetch('/api/rooms');
                     this.rooms = await res.json();
+                },
+                async api(path, opts = {}) {
+                    const res = await fetch(path, opts);
+                    let body = null;
+                    try { body = await res.json(); } catch (e) { /* non-JSON */ }
+                    if (!res.ok) {
+                        throw new Error((body && body.detail) || `Request failed (${res.status})`);
+                    }
+                    return body;
+                },
+                async _track(key, fn) {
+                    this.netLoading[key] = true;
+                    delete this.netError[key];
+                    try { await fn(); }
+                    catch (e) { this.netError[key] = (e && e.message) || 'Network error'; }
+                    finally { this.netLoading[key] = false; }
+                },
+                toast(msg, type = 'success', ms = 3500) {
+                    const id = ++this._toastSeq;
+                    this.toasts.push({ id, msg, type });
+                    setTimeout(() => this.dismissToast(id), ms);
+                },
+                dismissToast(id) {
+                    this.toasts = this.toasts.filter(t => t.id !== id);
+                },
+totalTenantPages() {
+                    return Math.ceil(this.filteredTenants.length / this.itemsPerPage) || 1;
+                },
+                get filteredPayments() {
+                    const q = (this.ledgerSearch || '').trim().toLowerCase();
+                    const queryTokens = this.tokenizeSearch(q);
+                    let rows = this.payments.filter(p => {
+                        if (this.ledgerPropertyFilter && String(p.room_id) && this.ledgerPropertyFilter) {
+                            // room-level property match via display_address prefix fallback
+                        }
+                        if (q) {
+                            const hay = ((p.tenant_name || '') + ' ' + (p.display_address || '') + ' ' + (p.note || '')).toLowerCase();
+                            const hayTokens = this.tokenizeSearch(hay);
+                            if (!this.matchTokens(queryTokens, hayTokens)) return false;
+                        }
+                        return true;
+                    });
+                    return rows;
+                },
+                totalLedgerPages() {
+                    return Math.ceil(this.filteredLedgers.length / this.itemsPerPage) || 1;
+                },
+                paginatedLedgers() {
+                    const start = (this.ledgerCurrentPage - 1) * this.itemsPerPage;
+                    return this.filteredLedgers.slice(start, start + this.itemsPerPage);
+                },
+                nextLedgerPage() { if (this.ledgerCurrentPage < this.totalLedgerPages()) this.ledgerCurrentPage++; },
+                prevLedgerPage() { if (this.ledgerCurrentPage > 1) this.ledgerCurrentPage--; },
+                totalPaymentPages() {
+                    return Math.ceil(this.filteredPayments.length / this.itemsPerPage) || 1;
+                },
+                paginatedPayments() {
+                    const start = (this.paymentCurrentPage - 1) * this.itemsPerPage;
+                    return this.filteredPayments.slice(start, start + this.itemsPerPage);
+                },
+                nextPaymentPage() { if (this.paymentCurrentPage < this.totalPaymentPages()) this.paymentCurrentPage++; },
+                prevPaymentPage() { if (this.paymentCurrentPage > 1) this.paymentCurrentPage--; },
+                get quickChipBase() {
+                    return this.newPayment.payment_type === 'DEPOSIT'
+                        ? Number(this.depositPendingForSelected) || 0
+                        : Number(this.selectedTenantOutstanding) || 0;
+                },
+                applyQuickChip(mode) {
+                    const due = this.quickChipBase;
+                    if (!due) return;
+                    const target = mode === 'half' ? Math.round(due / 2) : due;
+                    if (this.newPayment.payment_type === 'DEPOSIT') {
+                        this.newPayment.amount = target;
+                        return;
+                    }
+                    const allocs = this.newPayment.allocations;
+                    let remaining = target;
+                    allocs.forEach((a, i) => {
+                        a.amount = i === allocs.length - 1 ? remaining : Math.min(remaining, due);
+                        remaining = Math.max(0, remaining - a.amount);
+                    });
+                    this.paymentUserEdited = false;
+                },
+                clearAllocations() {
+                    if (this.newPayment.payment_type === 'DEPOSIT') { this.newPayment.amount = 0; return; }
+                    this.newPayment.allocations.forEach(a => { a.amount = 0; });
+                    this.paymentUserEdited = true;
+                },
+                get rentRemainingAfter() {
+                    return (Number(this.selectedTenantOutstanding) || 0) - (this.paymentTotal || 0);
+                },
+                get depositRemainingAfter() {
+                    return (Number(this.depositPendingForSelected) || 0) - (Number(this.newPayment.amount) || 0);
+                },
+                get remainingAfterPayment() {
+                    return this.newPayment.payment_type === 'DEPOSIT' ? this.depositRemainingAfter : this.rentRemainingAfter;
+                },
+                get paymentReminderPreview() {
+                    const p = this.newPayment;
+                    if (!p.due_date || !(this.remainingAfterPayment > 0)) return '';
+                    const t = this.activeTenants.find(x => Number(x.id) === Number(p.tenant_id));
+                    const nm = (t && t.display_address ? t.display_address + ' — ' : '') + (t ? t.tenant_name : '');
+                    if (p.payment_type === 'DEPOSIT') {
+                        return 'SECURITY DEPOSIT REMINDER\n' + nm +
+                               '\nYour deposit due date is : ' + p.due_date +
+                               '\nRemaining deposit to be paid : Rs. ' + Number(this.remainingAfterPayment).toLocaleString('en-IN');
+                    }
+                    return nm + '\nYour New Next Due Date is : ' + p.due_date +
+                           '\nAmount to be paid : Rs. ' + Number(this.remainingAfterPayment).toLocaleString('en-IN');
+                },
+                paginatedTenants() {
+                    const start = (this.tenantCurrentPage - 1) * this.itemsPerPage;
+                    return this.filteredTenants.slice(start, start + this.itemsPerPage);
+                },
+                nextTenantPage() {
+                    if (this.tenantCurrentPage < this.totalTenantPages()) this.tenantCurrentPage++;
+                },
+                prevTenantPage() {
+                    if (this.tenantCurrentPage > 1) this.tenantCurrentPage--;
+                },
+                async fetchVacantRooms() {
+                    const res = await fetch('/api/rooms/with-vacancy');
+                    this.vacantRooms = await res.json().catch(() => []);
+                },
+                onRoomSelect(room, prop) {
+                    this.selectedPropertyDefaults = {
+                        property_id: prop.property_id,
+                        apartment_name: prop.apartment_name,
+                        plot_number: prop.plot_number,
+                        default_base_rent: prop.default_base_rent,
+                        default_maintenance_fee: prop.default_maintenance_fee,
+                        default_security_deposit: prop.default_security_deposit
+                    };
+                },
+                loadPropertyDefaults(prop) {
+                    this.newTenant.base_rent_applied = prop.default_base_rent;
+                    this.newTenant.maintenance_applied = prop.default_maintenance_fee;
+                    this.newTenant.security_deposit_applied = prop.default_security_deposit;
+                    this.newTenant.booking_amount_paid = 0;
+                    this.calcPendingDeposit();
+                    this.toast('Property defaults loaded', 'success');
                 },
                 async fetchProperties() {
                     const res = await fetch('/api/properties');
@@ -2130,7 +3053,7 @@
                 openPaymentForTenant(tenantId) {
                     this.openAddPaymentModal(tenantId);
                 },
-                openAddPaymentModal(tenantId = null) {
+                openAddPaymentModal(tenantId = null, preset = null) {
                     const now = new Date();
                     const currentMonth = this.currentBillingPeriod();
                     this.newPayment.payment_date = now.toISOString().slice(0, 10);
@@ -2139,8 +3062,10 @@
                     this.newPayment.amount = 0;
                     this.newPayment.note = '';
                     this.newPayment.outstanding = 0;
+                    this.newPayment.due_date = '';
                     this.newPayment.payment_mode = 'CASH';
                     this.newPayment.payment_type = 'RENT';
+                    this._noteAutoSet = false;
                     this.paymentError = '';
                     this.paymentUserEdited = false;
                     const tid = tenantId !== null ? Number(tenantId) : null;
@@ -2150,8 +3075,21 @@
                     } else if (this.activeTenants.length > 0) {
                         this.newPayment.tenant_id = this.activeTenants[0].id;
                     }
+                    // Security-deposit preset: type DEPOSIT, amount = pending deposit
+                    if (preset && preset.type === 'DEPOSIT') {
+                        this.newPayment.due_date = '';
+                        this.newPayment.payment_type = 'DEPOSIT';
+                        this._noteAutoSet = true;
+                        const pending = this.depositPendingForSelected;
+                        this.newPayment.allocations = [{ billing_month: currentMonth, amount: pending }];
+                        this.newPayment.note = 'Security deposit payment';
+                        this.paymentUserEdited = false;
+                    }
                     this.showAddPaymentModal = true;
-                    this.refreshPaymentOutstanding();
+                    if (!preset || preset.type !== 'DEPOSIT') this.refreshPaymentOutstanding();
+                },
+                openDepositPaymentModal() {
+                    this.openAddPaymentModal(this.customerSel, { type: 'DEPOSIT' });
                 },
                 get paymentTotal() {
                     return this.newPayment.allocations.reduce((s, a) => s + (Number(a.amount) || 0), 0);
@@ -2194,6 +3132,28 @@
                     this.fetchDeposits();
                     this.fetchLedgers();
                     this.fetchStats();
+
+                    // Inline due date: create reminder for balance in the same save
+                    const remaining = this.remainingAfterPayment;
+                    if (remaining > 0 && this.newPayment.due_date) {
+                        try {
+                            await fetch('/api/reminders', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    tenant_id: Number(this.newPayment.tenant_id),
+                                    billing_month: this.newPayment.payment_type === 'DEPOSIT' ? this.currentBillingPeriod() : (this.newPayment.allocations.find(a => Number(a.amount) > 0)?.billing_month || this.newPayment.billing_month),
+                                    reminder_date: this.newPayment.due_date,
+                                    amount_due: remaining,
+                                    note: (this.newPayment.payment_type === 'DEPOSIT' ? 'Deposit balance' : 'Balance after part payment')
+                                })
+                            });
+                            this.toast('Payment saved. Due date set for balance ₹' + Number(remaining).toLocaleString('en-IN') + '.', 'success', 5000);
+                            if (this.currentTab === 'reminders') this.fetchReminders();
+                        } catch (e) {
+                            this.toast('Payment saved, but setting the due date failed: ' + e.message, 'warn', 5000);
+                        }
+                    }
                 },
                 async openEditLedger(ledger) {
                     const res = await fetch('/api/payments?billing_month=' + ledger.billing_month);
@@ -2263,9 +3223,29 @@
                         body: JSON.stringify(this.newTenant)
                     });
                     const body = await res.json().catch(() => ({}));
-                    if (!res.ok) { alert(body.detail || 'Failed to save tenant.'); return; }
+                    if (!res.ok) { this.toast(body.detail || 'Failed to save tenant.', 'error'); return; }
+                    const newId = body.tenant_id || body.id;
                     this.showAddTenantModal = false;
+                    // Deposit due reminder — same save, same as Record Payment flow
+                    if (newId && this.newTenant.pending_deposit_due_date && Number(this.pendingSecurityDeposit) > 0) {
+                        try {
+                            await fetch('/api/reminders', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    tenant_id: Number(newId),
+                                    billing_month: this.currentBillingPeriod(),
+                                    reminder_date: this.newTenant.pending_deposit_due_date,
+                                    amount_due: Number(this.pendingSecurityDeposit),
+                                    note: 'Deposit balance'
+                                })
+                            });
+                            if (this.currentTab === 'reminders') this.fetchReminders();
+                        } catch (e) { /* non-fatal: reminder can be set later from Due Dates */ }
+                    }
+                    this.toast('Tenant added.' + (this.newTenant.pending_deposit_due_date && Number(this.pendingSecurityDeposit) > 0 ? ' Deposit due reminder set for ₹' + Number(this.pendingSecurityDeposit).toLocaleString('en-IN') + '.' : ''), 'success', 4500);
                     this.fetchTenants();
+                    this.fetchVacantRooms();
                     this.fetchRooms();
                     this.fetchStats();
                     if (this.showVacancyModal === false && this.vacancyDetail) {
@@ -2277,9 +3257,18 @@
                         id: tenant.id, room_id: tenant.room_id, tenant_name: tenant.tenant_name, phone_number: tenant.phone_number,
                         base_rent_applied: tenant.base_rent_applied, maintenance_applied: tenant.maintenance_applied,
                         security_deposit_applied: tenant.security_deposit_applied, is_active: tenant.is_active || 'Y',
+                        booking_amount_paid: tenant.booking_amount_paid != null ? tenant.booking_amount_paid : 0,
+                        pending_deposit_due_date: tenant.pending_deposit_due_date ? String(tenant.pending_deposit_due_date).slice(0, 10) : '',
                         lease_start_date: tenant.lease_start_date ? tenant.lease_start_date.slice(0, 10) : '',
                         lease_end_date: tenant.lease_end_date ? tenant.lease_end_date.slice(0, 10) : ''
                     };
+                    // Pending deposit from DB (deposits API: required - all DEPOSIT payments)
+                    const dep = this.deposits.find(x => Number(x.tenant_id) === Number(tenant.id));
+                    if (dep) {
+                        this.editDepositPending = Math.max(0, (Number(dep.required_deposit) || 0) - (Number(dep.deposit_received) || 0));
+                    } else {
+                        this.editDepositPending = Math.max(0, (Number(tenant.security_deposit_applied) || 0) - (Number(tenant.booking_amount_paid) || 0));
+                    }
                     this.tenantEditError = '';
                     this.showEditTenantModal = true;
                 },
@@ -2288,6 +3277,8 @@
                         tenant_name: this.editTenant.tenant_name, room_id: Number(this.editTenant.room_id),
                         phone_number: this.editTenant.phone_number, base_rent_applied: Number(this.editTenant.base_rent_applied),
                         maintenance_applied: Number(this.editTenant.maintenance_applied), security_deposit_applied: Number(this.editTenant.security_deposit_applied),
+                        booking_amount_paid: Number(this.editTenant.booking_amount_paid) || 0,
+                        pending_deposit_due_date: this.editTenant.pending_deposit_due_date || null,
                         is_active: this.editTenant.is_active, lease_start_date: this.editTenant.lease_start_date || '',
                         lease_end_date: this.editTenant.lease_end_date || ''
                     };
@@ -2546,15 +3537,71 @@
                 },
                 async fetchReminders() {
                     if (!this.remindersMonth) return;
-                    const res = await fetch('/api/reminders?billing_month=' + this.remindersMonth);
-                    this.reminders = await res.json().catch(() => []);
-                    const res2 = await fetch('/api/reminders/tenants?billing_month=' + this.remindersMonth);
-                    this.reminderEligibleTenants = await res2.json().catch(() => []);
+                    const res = await fetch('/api/reminders?month=' + this.remindersMonth);
+                    const data = await res.json().catch(() => []);
+                    let eligible = [];
+                    try { 
+                        const res2 = await fetch('/api/reminders/tenants?billing_month=' + this.remindersMonth);
+                        if (res2.ok) eligible = await res2.json();
+                        if (!Array.isArray(eligible)) eligible = [];
+                    } catch (e) { eligible = [] }
+                    // Merge: all eligible tenants + all existing reminders (incl. deposit-only)
+                    const reminderMap = new Map();
+                    data.forEach(r => { if (!reminderMap.has(r.tenant_id)) reminderMap.set(r.tenant_id, r); });
+                    const seen = new Set();
+                    const merged = [];
+                    // Eligible tenants first (with NOT_SET fill-in)
+                    eligible.forEach(e => {
+                        seen.add(e.id);
+                        const existing = reminderMap.get(e.id);
+                        if (existing) {
+                            merged.push({ ...existing, outstanding: e.new_baki });
+                        } else {
+                            merged.push({
+                                id: null, tenant_id: e.id, tenant_name: e.tenant_name,
+                                display_address: e.display_address, reminder_date: null,
+                                amount_due: e.new_baki, outstanding: e.new_baki, note: '',
+                                status: 'NOT_SET', notify_sent_at: null, d1_sent_at: null,
+                                due_sent_at: null, billing_month: this.remindersMonth,
+                                remType: 'rent'
+                            });
+                        }
+                    });
+                    // Orphaned reminders (tenant has no outstanding ledger but HAS a set reminder)
+                    data.forEach(r => {
+                        if (!seen.has(r.tenant_id)) {
+                            merged.push({ ...r, outstanding: r.amount_due, remType: 'deposit' });
+                            seen.add(r.tenant_id);
+                        }
+                    });
+                    // Sort: ACTIVE first, then NOT_SET, then rest by date
+                    const order = { ACTIVE: 0, NOT_SET: 1, DONE: 2, SUPERSEDED: 3 };
+                    merged.sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9));
+                    this.reminders = merged;
+                    this.reminderEligibleTenants = eligible;
                 },
                 async fetchReminderSchedule() {
                     const res = await fetch('/api/reminders/schedule');
                     const s = await res.json().catch(() => ({}));
                     this.reminderSchedule = { send_time: s.send_time || '10:00', enabled: s.enabled !== false };
+                },
+                async fetchGasReports() {
+                    try {
+                        const res = await fetch('/api/gas-reports/status');
+                        const data = await res.json().catch(() => ({}));
+                        this.gasReports = { csvExists: !!data.csvExists, xlsxExists: !!data.xlsxExists };
+                    } catch (e) { /* keep defaults */ }
+                },
+                refreshGasReports() {
+                    this.fetchGasReports();
+                    this.toast('Report status refreshed', 'info', 2000);
+                },
+                downloadGasReport(type) {
+                    if (type === 'csv' && !this.gasReports.csvExists) { this.toast('CSV report not generated yet.', 'warn'); return; }
+                    if (type === 'xlsx' && !this.gasReports.xlsxExists) { this.toast('Excel report not generated yet.', 'warn'); return; }
+                    const label = type === 'csv' ? 'CSV' : 'Excel';
+                    window.open(`/api/gas-reports/download?type=${type}`, '_blank');
+                    this.toast(`${label} download started`, 'success');
                 },
                 async saveReminderSchedule() {
                     const res = await fetch('/api/reminders/schedule', {
@@ -2571,6 +3618,22 @@
                 },
                 openSetReminderModal() {
                     this.reminderForm = { id: null, tenant_id: '', billing_month: this.remindersMonth, reminder_date: '', amount_due: null, outstanding: 0, note: '' };
+                    this.reminderError = '';
+                    this.showReminderModal = true;
+                },
+                                openSetReminderModalFor(tenantId, amountDue, remType) {
+                    const t = this.reminders.find(x => Number(x.tenant_id) === Number(tenantId));
+                    const isDep = remType === 'deposit' || (t && (t.note || '').includes('eposit'));
+                    this.reminderForm = {
+                        id: null,
+                        tenant_id: String(tenantId),
+                        billing_month: this.remindersMonth,
+                        reminder_date: '',
+                        amount_due: amountDue || null,
+                        outstanding: amountDue || 0,
+                        note: isDep ? 'Deposit due' : '',
+                        rem_type: isDep ? 'deposit' : 'rent'
+                    };
                     this.reminderError = '';
                     this.showReminderModal = true;
                 },
@@ -2598,10 +3661,12 @@
                 },
                 openEditReminderModal(r) {
                     const t = this.reminderEligibleTenants.find(x => Number(x.id) === Number(r.tenant_id));
+                    const remType = (r.note || '').includes('eposit') ? 'deposit' : 'rent';
                     this.reminderForm = {
                         id: r.id, tenant_id: r.tenant_id, billing_month: r.billing_month,
                         reminder_date: String(r.reminder_date).slice(0, 10),
-                        amount_due: r.amount_due, outstanding: t ? t.new_baki : 0, note: r.note || ''
+                        amount_due: r.amount_due, outstanding: t ? t.new_baki : 0, note: r.note || '',
+                        rem_type: remType
                     };
                     this.reminderError = '';
                     this.showReminderModal = true;
@@ -2621,6 +3686,7 @@
                         note: f.note || ''
                     };
                     if (f.amount_due !== null && f.amount_due !== '') payload.amount_due = Number(f.amount_due);
+                    payload.rem_type = f.rem_type || 'rent';
                     this.reminderError = '';
                     const url = f.id ? `/api/reminders/${f.id}` : '/api/reminders';
                     const res = await fetch(url, {
@@ -2664,8 +3730,8 @@
                     this.showReminderLogModal = true;
                     await this.fetchReminderLog();
                 },
-                formatReminderDate(d) {
-                    if (!d) return '—';
+                formatReminderDate(d, status) {
+                    if (!d) return status === 'NOT_SET' ? 'Not Set' : '—';
                     const s = String(d).slice(0, 10);
                     try {
                         return new Date(s + 'T00:00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });

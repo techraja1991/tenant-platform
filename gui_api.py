@@ -33,7 +33,13 @@ def current_billing_period():
     return f"{now.year}-{now.month - 1:02d}"
 
 class BasicAuthMiddleware(BaseHTTPMiddleware):
+    # Paths that must be fetchable without auth (no secrets; needed for PWA/SW)
+    PUBLIC_PATHS = ("/sw.js", "/static/icons/", "/static/manifest.webmanifest")
+
     async def dispatch(self, request, call_next):
+        path = request.url.path
+        if any(path == p or path.startswith(p) for p in self.PUBLIC_PATHS):
+            return await call_next(request)
         auth = request.headers.get("Authorization")
         if auth and auth.startswith("Basic "):
             try:
@@ -91,6 +97,10 @@ class TenantCreate(BaseModel):
     base_rent_applied: float = Field(ge=0)
     maintenance_applied: Optional[float] = Field(default=0.00, ge=0)
     security_deposit_applied: Optional[float] = Field(default=0.00, ge=0)
+    booking_amount_paid: Optional[float] = Field(default=0.00, ge=0)
+    pending_deposit_due_date: Optional[str] = Field(default=None)
+    lease_start_date: Optional[str] = Field(default=None)
+    lease_end_date: Optional[str] = Field(default=None)
 
 class MaintenanceExpenseCreate(BaseModel):
     master_id: int
@@ -449,6 +459,72 @@ def get_dashboard_vacancy(upcoming_days: int = Query(120, ge=1)):
     }
 
 
+@app.get("/api/rooms/with-vacancy")
+def list_rooms_with_vacancy():
+    """Returns rooms grouped by property with vacancy status for smart tenant assignment."""
+    conn = get_db()
+    cur = conn.cursor()
+    
+    # Get all rooms with property info and active tenant status
+    cur.execute("""
+        SELECT r.*, pm.apartment_name, pm.plot_number,
+               pm.default_base_rent, pm.default_maintenance_fee, 
+               pm.default_security_deposit,
+               t.tenant_name, t.is_active, t.lease_end_date
+        FROM rental_core.rooms r
+        JOIN rental_core.property_masters pm ON r.master_id = pm.id
+        LEFT JOIN rental_core.tenants t ON t.room_id = r.id AND t.is_active = 'Y'
+        ORDER BY pm.apartment_name ASC, r.display_address ASC;
+    """)
+    rooms = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    # Group by property and determine vacancy status
+    by_property = {}
+    for room in rooms:
+        prop_key = room['master_id']
+        if prop_key not in by_property:
+            by_property[prop_key] = {
+                "property_id": prop_key,
+                "apartment_name": room['apartment_name'],
+                "plot_number": room['plot_number'],
+                "default_base_rent": room['default_base_rent'],
+                "default_maintenance_fee": room['default_maintenance_fee'],
+                "default_security_deposit": room['default_security_deposit'],
+                "rooms": []
+            }
+        
+        # Determine vacancy status
+        if room['tenant_name'] and room['is_active'] == 'Y':
+            if room['lease_end_date']:
+                status = "upcoming"
+                status_label = f"Available {room['lease_end_date']}"
+            else:
+                status = "occupied"
+                status_label = "Occupied"
+        else:
+            status = "vacant"
+            status_label = "Vacant"
+        
+        by_property[prop_key]["rooms"].append({
+            "id": room['id'],
+            "flat_number": room['flat_number'],
+            "display_address": room['display_address'],
+            "status": status,
+            "status_label": status_label,
+            "current_tenant": room['tenant_name'] if room['tenant_name'] else None,
+            "lease_end_date": str(room['lease_end_date']) if room['lease_end_date'] else None
+        })
+    
+    # Convert to list, sort: vacant first, then upcoming, then occupied
+    result = list(by_property.values())
+    for prop in result:
+        prop["rooms"].sort(key=lambda r: {"vacant": 0, "upcoming": 1, "occupied": 2}[r["status"]])
+    
+    return result
+
+
 @app.get("/api/properties")
 def list_properties():
     conn = get_db()
@@ -614,6 +690,8 @@ def list_tenants():
             t.security_deposit_applied,
             t.lease_start_date,
             t.lease_end_date,
+            t.booking_amount_paid,
+            t.pending_deposit_due_date,
             r.display_address,
             COALESCE((
                 SELECT new_baki FROM rental_core.monthly_ledgers ml
@@ -794,6 +872,28 @@ def tenant_year_ledger(tenant_id: int, year: int = Query(..., ge=2000, le=2100))
             })
         months.append(base)
 
+    # Get deposit status for this tenant
+    cur.execute("""
+        SELECT t.security_deposit_applied AS required,
+               COALESCE(SUM(p.amount), 0) AS received
+        FROM rental_core.tenants t
+        LEFT JOIN rental_core.tenant_payments p 
+            ON p.tenant_id = t.id AND p.payment_type = 'DEPOSIT'
+        WHERE t.id = %s
+        GROUP BY t.id
+    """, (tenant_id,))
+    deposit_row = cur.fetchone()
+    deposit = None
+    if deposit_row:
+        required = float(deposit_row['required'] or 0)
+        received = float(deposit_row['received'] or 0)
+        deposit = {
+            "required": required,
+            "received": received,
+            "pending": required - received,
+            "status": "Full" if received >= required else ("Partial" if received > 0 else "Zero")
+        }
+
     cur.close()
     conn.close()
     return {
@@ -812,6 +912,7 @@ def tenant_year_ledger(tenant_id: int, year: int = Query(..., ge=2000, le=2100))
             "apartment_name": tenant['apartment_name'],
             "plot_number": tenant['plot_number'],
         },
+        "deposit": deposit,
         "year": year,
         "months": months,
     }
@@ -821,15 +922,40 @@ def create_tenant(tenant: TenantCreate):
     conn = get_db()
     cur = conn.cursor()
     try:
+        # Empty strings must become NULL for DATE columns
+        for _f in ("pending_deposit_due_date", "lease_start_date", "lease_end_date"):
+            if getattr(tenant, _f) == "":
+                setattr(tenant, _f, None)
         cur.execute("""
             INSERT INTO rental_core.tenants 
-            (room_id, tenant_name, phone_number, base_rent_applied, maintenance_applied, security_deposit_applied, is_active)
-            VALUES (%s, %s, %s, %s, %s, %s, 'Y') RETURNING id;
+            (room_id, tenant_name, phone_number, base_rent_applied, maintenance_applied, security_deposit_applied, 
+             booking_amount_paid, pending_deposit_due_date, lease_start_date, lease_end_date, is_active)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'Y') RETURNING id;
         """, (
             tenant.room_id, tenant.tenant_name, tenant.phone_number, 
-            tenant.base_rent_applied, tenant.maintenance_applied, tenant.security_deposit_applied
+            tenant.base_rent_applied, tenant.maintenance_applied, tenant.security_deposit_applied,
+            tenant.booking_amount_paid, tenant.pending_deposit_due_date,
+            tenant.lease_start_date, tenant.lease_end_date
         ))
         new_id = cur.fetchone()['id']
+        
+        # If booking amount was paid, create a DEPOSIT payment record
+        if tenant.booking_amount_paid and tenant.booking_amount_paid > 0:
+            cur.execute("""
+                INSERT INTO rental_core.tenant_payments 
+                (tenant_id, room_id, billing_month, payment_date, amount, payment_mode, payment_type, note, batch_id)
+                VALUES (%s, %s, %s, %s, %s, %s, 'DEPOSIT', %s, %s);
+            """, (
+                new_id,
+                tenant.room_id,
+                tenant.lease_start_date[:7] if tenant.lease_start_date else datetime.now().strftime("%Y-%m"),
+                tenant.lease_start_date if tenant.lease_start_date else datetime.now().date(),
+                tenant.booking_amount_paid,
+                'CASH',
+                f'Booking amount for security deposit - {tenant.tenant_name}',
+                None  # batch_id
+            ))
+        
         conn.commit()
         return {"status": "SUCCESS", "tenant_id": new_id}
     except Exception as e:
@@ -1011,12 +1137,17 @@ def get_gas_mappings():
 # --- 6. MONTHLY LEDGER VIEW ---
 @app.get("/api/ledgers/months")
 def list_ledger_months():
-    """Distinct billing months available in the ledgers, newest first."""
+    """Distinct billing months available in the ledgers OR payments, newest first."""
     conn = get_db()
     cur = conn.cursor()
     cur.execute("""
-        SELECT DISTINCT billing_month
-        FROM rental_core.monthly_ledgers
+        SELECT DISTINCT billing_month FROM (
+            SELECT billing_month FROM rental_core.monthly_ledgers
+            UNION
+            SELECT billing_month FROM rental_core.tenant_payments
+            UNION
+            SELECT billing_month FROM rental_core.tenant_reminders
+        ) m
         ORDER BY billing_month DESC;
     """)
     months = [r['billing_month'] for r in cur.fetchall()]
@@ -1279,6 +1410,62 @@ def delete_payment(payment_id: int):
         conn.close()
 
 
+@app.get("/api/gas-reports/status")
+def get_gas_reports_status():
+    """Check if gas report files exist and their last modified times."""
+    import os
+    from datetime import datetime
+    
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    csv_path = os.path.join(base_dir, "gujarat_gas_report.csv")
+    xlsx_path = os.path.join(base_dir, "gujarat_gas_report.xlsx")
+    
+    csv_exists = os.path.exists(csv_path)
+    xlsx_exists = os.path.exists(xlsx_path)
+    
+    last_updated = None
+    if csv_exists:
+        last_updated = datetime.fromtimestamp(os.path.getmtime(csv_path)).isoformat()
+    
+    return {
+        "csvExists": csv_exists,
+        "xlsxExists": xlsx_exists,
+        "lastUpdated": last_updated,
+        "csvPath": csv_path if csv_exists else None,
+        "xlsxPath": xlsx_path if xlsx_exists else None
+    }
+
+
+@app.get("/api/gas-reports/download")
+def download_gas_report(type: str = "csv"):
+    """Download gas report file (csv or xlsx)."""
+    import os
+    from fastapi.responses import FileResponse
+    from fastapi import HTTPException
+    
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    if type == "csv":
+        file_path = os.path.join(base_dir, "gujarat_gas_report.csv")
+        media_type = "text/csv"
+        filename = "gujarat_gas_report.csv"
+    elif type == "xlsx":
+        file_path = os.path.join(base_dir, "gujarat_gas_report.xlsx")
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        filename = "gujarat_gas_report.xlsx"
+    else:
+        raise HTTPException(status_code=400, detail="Invalid type. Use 'csv' or 'xlsx'")
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail=f"{type.upper()} report not found. Generate it first.")
+    
+    return FileResponse(
+        path=file_path,
+        media_type=media_type,
+        filename=filename
+    )
+
+
 @app.get("/api/deposits")
 def get_deposit_status():
     conn = get_db()
@@ -1440,7 +1627,11 @@ if os.path.exists("static"):
 @app.get("/", response_class=FileResponse)
 def serve_gui():
     if os.path.exists("static/index.html"):
-        return FileResponse("static/index.html")
+        return FileResponse("static/index.html", headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        })
     raise HTTPException(status_code=404, detail="Frontend static/index.html not found.")
 
 @app.get("/index_v1", response_class=FileResponse)
@@ -1451,6 +1642,17 @@ def serve_gui_v1():
     raise HTTPException(status_code=404, detail="Legacy GUI static/index_v1.html not found.")
 
 
+@app.get("/sw.js", include_in_schema=False)
+def serve_service_worker():
+    """PWA service worker served from root so its scope covers the whole app."""
+    if os.path.exists("static/sw.js"):
+        return FileResponse("static/sw.js", media_type="application/javascript", headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Service-Worker-Allowed": "/",
+        })
+    raise HTTPException(status_code=404, detail="Service worker not found.")
+
+
 
 class TenantUpdate(BaseModel):
     tenant_name: Optional[str] = None
@@ -1459,6 +1661,8 @@ class TenantUpdate(BaseModel):
     base_rent_applied: Optional[float] = Field(default=None, ge=0)
     maintenance_applied: Optional[float] = Field(default=None, ge=0)
     security_deposit_applied: Optional[float] = Field(default=None, ge=0)
+    booking_amount_paid: Optional[float] = Field(default=None, ge=0)
+    pending_deposit_due_date: Optional[str] = None
     is_active: Optional[str] = Field(default=None, pattern="^[YN]$")
     lease_start_date: Optional[str] = None
     lease_end_date: Optional[str] = None
@@ -1476,7 +1680,7 @@ def update_tenant(tenant_id: int, data: TenantUpdate):
 
         updates = {}
         for col in ["tenant_name", "room_id", "phone_number", "is_active",
-                    "lease_start_date", "lease_end_date"]:
+                    "lease_start_date", "lease_end_date", "booking_amount_paid", "pending_deposit_due_date"]:
             val = getattr(data, col, None)
             if val is not None:
                 updates[col] = val
@@ -1492,6 +1696,8 @@ def update_tenant(tenant_id: int, data: TenantUpdate):
             updates['lease_start_date'] = None
         if updates.get('lease_end_date') == '':
             updates['lease_end_date'] = None
+        if updates.get('pending_deposit_due_date') == '':
+            updates['pending_deposit_due_date'] = None
         if updates.get('room_id'):
             cur.execute("SELECT COUNT(*) AS cnt FROM rental_core.rooms WHERE id = %s", (updates['room_id'],))
             if cur.fetchone()['cnt'] == 0:
@@ -1779,6 +1985,7 @@ class ReminderSet(BaseModel):
     reminder_date: str  # YYYY-MM-DD
     amount_due: Optional[float] = Field(default=None, ge=0)
     note: Optional[str] = None
+    rem_type: Optional[str] = Field(default='rent', pattern="^(rent|deposit)$")
 
 
 class ReminderSchedule(BaseModel):
@@ -1810,10 +2017,11 @@ def set_reminder_schedule(data: ReminderSchedule):
 
 
 @app.get("/api/reminders")
-def list_reminders(billing_month: str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$")):
-    """Month-wise reminder view: every reminder row for a billing month, with
-    the ACTIVE (live) reminder for each tenant flagged first."""
-    rows = rm.month_reminders(billing_month)
+def list_reminders(month: str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$")):
+    """Calendar-month reminder view: every reminder whose DUE DATE falls in this
+    month, regardless of billing_month. Shows both rent and deposit reminders."""
+    year, mon = int(month[:4]), int(month[5:7])
+    rows = rm.month_reminders(year, mon)
     return rows
 
 
@@ -1854,6 +2062,11 @@ def set_reminder(data: ReminderSet):
     """
     from datetime import datetime as _dt
     try:
+        # Prepend type tag to note for filtering
+        if data.rem_type == 'deposit' and data.note and 'eposit' not in (data.note or ''):
+            data.note = ('Deposit — ' + data.note) if data.note else 'Deposit due'
+        elif data.rem_type == 'rent' and data.note and 'ent' not in (data.note or '').lower():
+            data.note = ('Rent — ' + data.note) if data.note else ''
         reminder_date = _dt.strptime(data.reminder_date, "%Y-%m-%d").date()
     except ValueError:
         raise HTTPException(status_code=400, detail="reminder_date must be YYYY-MM-DD")
@@ -1924,6 +2137,11 @@ def update_reminder(reminder_id: int, data: ReminderSet):
     """Edit the date/amount of an existing reminder (keeps one row)."""
     from datetime import datetime as _dt
     try:
+        # Prepend type tag to note for filtering
+        if data.rem_type == 'deposit' and data.note and 'eposit' not in (data.note or ''):
+            data.note = ('Deposit — ' + data.note) if data.note else 'Deposit due'
+        elif data.rem_type == 'rent' and data.note and 'ent' not in (data.note or '').lower():
+            data.note = ('Rent — ' + data.note) if data.note else ''
         reminder_date = _dt.strptime(data.reminder_date, "%Y-%m-%d").date()
     except ValueError:
         raise HTTPException(status_code=400, detail="reminder_date must be YYYY-MM-DD")

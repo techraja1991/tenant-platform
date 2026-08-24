@@ -29,6 +29,44 @@
 | 2026-08-20 | **Dashboard vacancy card detail + one-click occupy**: `GET /api/dashboard/vacancy?upcoming_days=120` returns vacant rooms grouped by property (with unit list) + leases expiring in the window (NOT counted as vacant); modal lists vacant units; each unit chip opens the Add-Tenant modal pre-filled with `room_id`, property defaults and lease start = today | `static/index.html`, `gui_api.py` |
 | 2026-08-20 | **Clickable KPI cards + collection progress**: every KPI card opens a detail modal backed by `GET /api/dashboard/kpi` (per-property occupancy/billed/collected/outstanding, tenant directory with active status, per-tenant ledger breakdown); dashboard gains a Collection Progress section (progress bar collected vs total fixed due + Total Fixed Due / Collected / Current Due cards); `stats` now returns `fixed_due_total` (Σ `gross_baki`) and `current_due_total` (Σ positive `new_baki`) | `static/index.html`, `gui_api.py` |
 | 2026-08-20 | **KPI modal semantics split**: Outstanding Dues shows `new_baki` + "Carried fwd vs Current month" split (`prev_baki` vs `new_baki−prev_baki`) + `payment_status` badge; Monthly Rent Billed shows bill composition (Rent/Light/Gas/Maint/Misc → Month Total, sorted by month total desc) — the two cards now show distinct, meaningful detail | `static/index.html`, `gui_api.py` |
+| 2026-08-22 | **GUI Polish Phase 1 fixes**: Tenant/Customer search now uses token-based matching (`tokenizeSearch`/`matchTokens`) — excludes phone number from search haystack (prevents "56 3" false-matching phone digits); Customer View auto-selects single search match via `$watch('customerSearch')`; Ledger search clears `ledgerSearch` when jumping from Properties/Recovery KPI; duplicate pagination removed from Ledger & Payment History tabs (one pagination per list at bottom); `kpiPropertyLedgers` clears `ledgerSearch` and fetches ledgers on property jump; all tests pass at 390px & 1440px (no JS errors, no horizontal overflow) | `static/index.html` |
+| 2026-08-22 | **Modal & Drawer Transitions**: Added smooth `x-transition` animations to all 19 modals + mobile drawer — backdrop fades (150ms enter / 100ms leave), modal content slides up on mobile / fades+scales on desktop (200ms enter / 150ms leave), drawer panel slides from left (250ms enter / 200ms leave). Fixes the "weird" jarring transitions when stacking modals (e.g., KPI Outstanding → Record Payment) and opening/closing the drawer. Native-feeling, performant, zero-JS Alpine transitions. | `static/index.html` |
+| 2026-08-22 | **Stacked Modal Transitions (KPI → Action)**: Fixed the core issue where KPI modal closed before action modal opened. Now KPI modal STAYS OPEN underneath while Payment/Customer/WhatsApp/Due Date modals animate in on top. Back button #1 closes top modal, Back button #2 closes KPI. Implemented by: (1) removing `showKpiModal = false` from `kpiRecordPayment`, `kpiOpenCustomer`, `kpiWhatsApp`, `kpiSetDue`; (2) updating `popstate` handler to close only modals "above" the target in `_modalFlags` priority order instead of all modals. Verified at 390px & 1440px — smooth, native-feeling stacked transitions. | `static/index.html` |
+| 2026-08-22 | **Call & WhatsApp Buttons**: Added `openDialer(phone)` and `openBlankWhatsApp(phone)` helpers. Tenant tab: call + blank WhatsApp (no message) buttons on mobile cards & desktop table phone column. Ledger tab: call button in mobile cards (next to WhatsApp with hisab). Customer View: call button in header + next to phone in details grid. Blank WhatsApp (wa.me link only) ONLY in Tenant tab; other places keep existing WhatsApp-with-hisab buttons. All verified at 390px & 1440px. | `static/index.html` |
+| 2026-08-22 | **Add New Tenant — Smart Form Overhaul**: 
+- New API `/api/rooms/with-vacancy` returns rooms grouped by property with vacancy status (vacant/upcoming/occupied) and property defaults.
+- Modal now shows intelligent room selector: vacant units first (🟢), then upcoming with lease end date (🟡), then occupied (🔴).
+- "Load Defaults" button auto-fills Applied Rent, Maintenance, Security Deposit Required from property master.
+- Lease End Date added as required field (previously missing from add form).
+- Security Deposit labeled as "Required" (not paid amount).
+- Historical entry mode: if Lease Start < today, all units shown (no auto-filter/auto-fill).
+- Edit Tenant modal now includes Lease End Date.
+- Full regression tests pass at 390px & 1440px. | `gui_api.py`, `static/index.html` |
+| 2026-08-22 | **Add New Tenant — Security Deposit Booking & Lease Dates**:
+- Booking Amount Paid field added (applied towards Security Deposit Required).
+- Auto-calculated Pending Security Deposit = Required − Booking Amount (live update via `calcPendingDeposit()`).
+- Pending Security Deposit Due Date field added (required).
+- Lease Start Date and Lease End Date now side-by-side in same row.
+- Security Deposit Required auto-filled from property default via "Load Defaults" button.
+- Booking amount and pending deposit due date saved to DB (new columns `booking_amount_paid`, `pending_deposit_due_date`).
+- Historical entry: if Lease Start < today, all units shown, no auto-filter/auto-fill.
+- All tests pass at 390px & 1440px. | `gui_api.py`, `static/index.html`, `migrations/004_add_tenant_booking_fields.sql` |
+| 2026-08-22 | **Gujarat Gas Automation — Enhanced Import & GUI Download**:
+- Updated `import_gas_metrics.py` to parse new `gujarat_gas_report.csv` format with all fields: account_number, bp_number, customer_name, latest_invoice_no, invoice_date, billing_period, period_from, period_to, billed_amount, invoice_due_date, previous_paid_date, previous_paid_amount.
+- Added bimonthly duplicate prevention: unique index on (customer_number, period_from, period_to) + invoice_no check.
+- Enhanced gas_bill_master with 11 new fields: invoice_no, billing_period, period_from, period_to, invoice_due_date, previous_paid_date, previous_paid_amount, bp_number, customer_name, source_file, is_bimonthly.
+- Auto-maps connections via gas_metrics table and tenant name matching.
+- Created `archive_gas_reports.py` to store files with month-specific naming (gujarat_gas_report_YYYYMM.csv/xlsx).
+- Added Gas Reports section to Payments tab with CSV/Excel download buttons, refresh button, and file status display.
+- Added API endpoints: `/api/gas-reports/status` and `/api/gas-reports/download?type=csv|xlsx`.
+- Migration `005_gas_bill_enhanced_fields.sql` for schema changes (run as DB owner).
+- All tests pass at 390px & 1440px. | `gui_api.py`, `import_gas_metrics.py`, `archive_gas_reports.py`, `static/index.html`, `migrations/005_gas_bill_enhanced_fields.sql` |
+| 2026-08-22 | **Booking Amount as Payment Transaction & Deposit Status Fix**:
+- Booking Amount Paid now creates a DEPOSIT payment record in `tenant_payments` table when tenant is created (not just stored in tenants table)
+- Updated `get_deposit_status` to correctly compute received amount from DEPOSIT payment records
+- Security Deposit Status tab now correctly shows: Required Deposit, Received (from DEPOSIT payments), Pending = Required - Received
+- Booking amount treated as actual payment transaction with proper audit trail in payment tables
+- All tests pass at 390px & 1440px. | `gui_api.py`, `static/index.html` |
 
 ---
 
@@ -189,6 +227,25 @@ Goal: a fast, mobile-first operational UI with an at-a-glance executive dashboar
 
 ---
 
+## Phase 10 — GUI Power & Polish (mobile-first)
+
+Goal: make the app feel like a native mobile tool — installable (PWA), fast data entry, non-blocking feedback, resilient loading, and proper modal behaviour.
+
+| # | Sub-task | Details | Status |
+|---|---|---|---|
+| 10.1 | PWA install | `manifest.webmanifest` + generated icons (192/512/maskable/apple-touch via Pillow); `sw.js` served from root route `/sw.js` (full scope): API never cached, app shell network-first w/ offline fallback, CDN libs stale-while-revalidate; SW registration on HTTPS | ✅ Done |
+| 10.2 | Quick-pay chips | Record Payment: Full ₹due / Half / Clear chips distribute across allocation rows top-down (equal split, remainder on last row); respects manual-edit flag; exact-outstanding pre-fill retained | ✅ Done |
+| 10.3 | Numeric keyboards | All 22 money inputs got `inputmode="decimal" min="0"` for proper mobile keypads | ✅ Done |
+| 10.4 | Toast system | Non-blocking toasts (success/error/info/warn, tap-to-dismiss, auto-timeout) above bottom nav on mobile / bottom-right on desktop; all 13 `alert()` replaced; success toasts added to previously-silent saves (tenant/property/room/expense/template/payment/ledger/mapping deletes+edits); destructive `confirm()` kept | ✅ Done |
+| 10.5 | Resilient loading | `api()` helper throws server detail; `_track()` per-section loading/error state; shimmer skeletons on dashboard/tenants/ledgers/payments while loading; red Retry banners on 7 sections; `initData()` uses `Promise.allSettled` so one failure can't blank other tabs | ✅ Done |
+| 10.6 | Modal ergonomics | Alpine Focus plugin: every modal gets `x-trap.inert.noscroll` (focus trap + body scroll lock + first-field focus — payment tenant select autofocus); Esc closes topmost modal (QR-aware) & drawer; consistent backdrop-click close on all 19 modals | ✅ Done |
+| 10.7 | Android back-gesture / history integration | `initNav()` wires `history.pushState`/`popstate`: opening any of the 19 modals pushes a history entry (`#m=flag`) so the **back gesture/button closes the topmost modal instead of leaving the app**; tab switches push `#tab` entries so back walks tabs backwards; **stacked transitions**: launching an action from inside a KPI modal (Record Payment / Set due date / Customer / WhatsApp) keeps the KPI entry and pushes the action on top — back #1 restores the KPI modal (with silently refreshed data), back #2 exits; vacancy→occupy uses entry-replacement so one back exits cleanly; UI-closes unwind their entry (no dangling history); deep-link restore `/#tenants`; drawer also closes on back | ✅ Done |
+| 10.8 | Actionable KPI cards | Every KPI drill-down row is now actionable (reuses existing flows — zero new endpoints): Outstanding rows → tap = Record Payment + WhatsApp / Set-due-date / Customer icons; Tenant Directory → tap = Customer View (+ Record Payment for active); Rent Billed & Collected → tap = Customer View (+ Record Payment when due > 0); Properties Overview & Recovery → tap = jumps to Monthly Ledgers pre-filtered on that property | ✅ Done |
+| 10.9 | Android back-gesture / history integration (stacked) | `initNav()` wires `history.pushState`/`popstate`: opening any of the 19 modals pushes a history entry (`#m=flag`) so the **back gesture/button closes the topmost modal instead of leaving the app**; tab switches push `#tab` entries so back walks tabs backwards; **stacked transitions**: launching an action from inside a KPI modal (Record Payment / Set due date / Customer / WhatsApp) keeps the KPI entry and pushes the action on top — back #1 restores the KPI modal (with silently refreshed data), back #2 exits; vacancy→occupy uses entry-replacement so one back exits cleanly; UI-closes unwind their entry (no dangling history); deep-link restore `/#tenants`; drawer also closes on back | ✅ Done |
+| 10.10 | GUI Polish Phase 1 — Global search/filter, pagination, go-to-top | Ledgers tab: global search/filter/sort bar above sub-tabs (applies to both Ledger & Payment History); pagination on all lists (15/page); Tenants tab: search by name/phone/address + status filter (Active/Inactive) + pagination; Customer View: searchable customer dropdown + year ledger pagination (10/page) + prev/next nav; Properties/Recovery KPIs → click property card → jumps to Ledgers pre-filtered; **Go to top** floating button (appears after 200px scroll, smooth scroll to top); **scroll listener on document/documentElement** for reliable detection; all lists use consistent 15/page pagination | ✅ Done |
+
+---
+
 ## Current Focus
 
 **Phase 0 (finishing):** item 0.5 only — pipeline scheduling automation (systemd timer). Schema hardening (0.6–0.9) is done.
@@ -198,3 +255,4 @@ Goal: a fast, mobile-first operational UI with an at-a-glance executive dashboar
 **Phase 7 (delivered, one manual step):** WhatsApp reminders built — templates, mappings, manual buttons and the Playwright auto-sender are live. Before first automated run, complete one-time login: `xvfb-run python send_whatsapp_reminders.py --login`, scan `/static/whatsapp_qr.png`, then the dashboard button sends reminders automatically.
 **Phase 8 (delivered):** per-month next-due-date reminders live — set dates from the Due Dates tab, history per month with supersede, auto-send (NOTIFY / D-1 / DUE+hisab) at the admin-set master time via the 5-minute systemd dispatcher, and no send when the month's balance is already paid. End-to-end verified to the dummy number 919033127964.
 **Phase 9 (delivered):** executive dashboard + ledger UX overhaul complete — all KPIs are drill-down-able, ledger is search/filter/sort-able, vacancy has one-click occupy, and the dashboard shows live collection progress. Verify with real payment data as August 2026 progresses.
+**Phase 10 (delivered):** mobile power & polish — PWA install (home-screen icon + offline shell + CDN caching), quick-pay chips, numeric keypads, toast feedback everywhere, skeleton/retry loading states, and proper modal behaviour (Esc / backdrop / focus trap / scroll lock). Note: service worker requires a trusted certificate in some browsers — currently verified working; revisit when Let's Encrypt lands (4.4). Next GUI phase candidates: "Today" cockpit strip, defaulter follow-up queue, hash routing + persisted filters.
