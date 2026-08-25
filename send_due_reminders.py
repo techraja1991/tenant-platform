@@ -42,18 +42,19 @@ _BATCH = None
 _HEADED = False
 
 
-def log_reminder_send(batch_id, reminder, send_type, message, status, error=None):
+def log_reminder_send(batch_id, reminder, send_type, message, status, error=None, screenshot_b64=None):
     conn = get_db_connection(as_dict=True)
     cur = conn.cursor()
     cur.execute("""
         INSERT INTO rental_core.reminder_send_log
         (batch_id, reminder_id, tenant_id, phone_number, send_type,
-         message, status, error, sent_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+         message, status, error, sent_at, screenshot)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, (
         batch_id, reminder['id'], reminder['tenant_id'], reminder['phone_number'],
         send_type, message, status, error,
         datetime.now() if status == "SENT" else None,
+        screenshot_b64,
     ))
     conn.commit()
     cur.close()
@@ -246,22 +247,54 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
             time.sleep(random.uniform(0.4, 1.2))
             page.locator(SELECTOR_SEND).first.click()
             time.sleep(random.uniform(1.0, 2.0))
+            # Verify delivery: the outgoing message must actually appear in
+            # the chat pane (#main). Checking only the composer being cleared
+            # is NOT enough — a failed paste also leaves it empty.
+            import time as _t
+            _t.sleep(random.uniform(0.5, 1.0))
+            snippet = ' '.join(it["message"].split())[-45:]
+            try:
+                page.wait_for_function(
+                    """(snip) => {
+                        const main = document.querySelector('#main');
+                        if (!main) return false;
+                        const txt = (main.innerText || '').replace(/\\s+/g, ' ');
+                        return txt.includes(snip);
+                    }""",
+                    arg=snippet,
+                    timeout=20000,
+                )
+                delivered = True
+            except Exception:
+                delivered = False
+
+            # Screenshot of the chat right after send attempt (proof)
+            screenshot_b64 = None
+            try:
+                import base64 as _b64
+                screenshot_b64 = _b64.b64encode(page.screenshot(full_page=False)).decode('utf-8')
+            except Exception:
+                pass
+
             if test_number:
                 it = {**it, "phone_number": wm.normalize_phone(test_number)}
             reminder = {
                 "id": it["reminder_id"], "tenant_id": it["tenant_id"],
                 "phone_number": it["phone_number"], "billing_month": it["billing_month"],
             }
-            log_reminder_send(_BATCH, reminder, it["send_type"], it["message"], "SENT")
-            if it["send_type"] == "NOTIFY":
+            if delivered:
+                log_reminder_send(_BATCH, reminder, it["send_type"], it["message"], "SENT",
+                                  screenshot_b64=screenshot_b64)
                 if it.get("log_id"):
                     _mark_log_sent(it["log_id"])
                 stamp_reminder_sent(it["reminder_id"], "notify_sent_at")
-            elif it["send_type"] in ("D1", "DUE"):
-                col = {"D1": "d1_sent_at", "DUE": "due_sent_at"}[it["send_type"]]
-                stamp_reminder_sent(it["reminder_id"], col)
-            sent += 1
-            print(f"   ✅ Sent {it['label']} to tenant {it['tenant_id']}")
+                sent += 1
+                print(f"   ✅ Sent {it['label']} to tenant {it['tenant_id']}")
+            else:
+                log_reminder_send(_BATCH, reminder, it["send_type"], it["message"], "FAILED",
+                                  error="Delivery not confirmed in chat", screenshot_b64=screenshot_b64)
+                failed += 1
+                print(f"   ❌ Delivery unconfirmed for tenant {it['tenant_id']}")
         except Exception as e:
             print(f"   ❌ Failed for tenant {it['tenant_id']}: {e}")
             if test_number:

@@ -2007,7 +2007,7 @@
             <div class="table-scroll overflow-x-auto">
                 <table class="w-full text-left border-collapse text-sm min-w-max">
                     <thead class="bg-slate-800/60 text-slate-300">
-                        <tr><th class="p-3">Status</th><th class="p-3">Tenant</th><th class="p-3">Phone</th><th class="p-3">Month</th><th class="p-3">Template</th><th class="p-3">Sent At</th><th class="p-3">Error</th></tr>
+                        <tr><th class="p-3">Status</th><th class="p-3">Tenant</th><th class="p-3">Phone</th><th class="p-3">Month</th><th class="p-3">Template</th><th class="p-3">Sent At</th><th class="p-3">Error</th><th class="p-3">Screenshot</th></tr>
                     </thead>
                     <tbody class="divide-y divide-slate-800">
                         <template x-for="row in sendLog" :key="row.id">
@@ -2019,6 +2019,11 @@
                                 <td class="p-3 text-slate-400" x-text="row.template_name || '—'"></td>
                                 <td class="p-3 text-slate-400" x-text="row.sent_at ? String(row.sent_at).slice(0,19) : '—'"></td>
                                 <td class="p-3 text-rose-400 text-xs" x-text="row.error || '—'"></td>
+                                <td class="p-3">
+                                    <a href="data:image/png;base64,row.screenshot" target="_blank" class="text-slate-400 text-xs underline cursor-pointer" title="View screenshot">
+                                        {{ row.screenshot ? row.screenshot.substring(0, 20) + '...' : 'no screenshot' }}
+                                    </a>
+                                </td>
                             </tr>
                         </template>
                     </tbody>
@@ -2119,7 +2124,7 @@
             <div class="table-scroll overflow-x-auto">
                 <table class="w-full text-left border-collapse text-sm min-w-max">
                     <thead class="bg-slate-800/60 text-slate-300">
-                        <tr><th class="p-3">Status</th><th class="p-3">Type</th><th class="p-3">Tenant</th><th class="p-3">Phone</th><th class="p-3">Batch</th><th class="p-3">Sent At</th><th class="p-3">Error</th></tr>
+                        <tr><th class="p-3">Status</th><th class="p-3">Type</th><th class="p-3">Tenant</th><th class="p-3">Phone</th><th class="p-3">Batch</th><th class="p-3">Sent At</th><th class="p-3">Error</th><th class="p-3">Screenshot</th></tr>
                     </thead>
                     <tbody class="divide-y divide-slate-800">
                         <template x-for="row in reminderLog" :key="row.id">
@@ -2131,6 +2136,14 @@
                                 <td class="p-3 text-slate-400 text-xs truncate max-w-[120px]" x-text="row.batch_id || '—'"></td>
                                 <td class="p-3 text-slate-400" x-text="row.sent_at ? String(row.sent_at).slice(0,19) : '—'"></td>
                                 <td class="p-3 text-rose-400 text-xs" x-text="row.error || '—'"></td>
+                                <td class="p-3">
+                                    <template x-if="row.screenshot">
+                                        <button @click="viewScreenshot(row)" class="px-2 py-1 rounded bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600/40 text-xs font-medium"><i class="fa-solid fa-image mr-1"></i>View</button>
+                                    </template>
+                                    <template x-if="!row.screenshot">
+                                        <span class="text-slate-600 text-xs">—</span>
+                                    </template>
+                                </td>
                             </tr>
                         </template>
                     </tbody>
@@ -2140,6 +2153,25 @@
                 <button @click="showReminderLogModal = false" class="flex-1 px-4 py-3 bg-slate-700 rounded-lg hover:bg-slate-600">Close</button>
                 <button @click="fetchReminderLog()" class="flex-1 px-4 py-3 bg-indigo-600 rounded-lg hover:bg-indigo-500">Refresh</button>
             </div>
+        </div>
+    </div>
+
+    <!-- SCREENSHOT VIEWER MODAL -->
+    <div x-show="showScreenshotModal" x-cloak class="fixed inset-0 bg-black/80 flex items-center justify-center z-[60] p-4">
+        <div class="bg-slate-900 rounded-xl border border-slate-800 max-w-md w-full space-y-3 max-h-[94vh] overflow-y-auto p-5">
+            <div class="flex items-center justify-between">
+                <h2 class="text-lg font-bold"><i class="fa-brands fa-whatsapp text-green-400 mr-1"></i>Sent Proof</h2>
+                <button @click="showScreenshotModal = false" class="text-slate-400 text-xl"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="grid grid-cols-2 gap-2 text-xs text-slate-400" x-show="screenshotMeta">
+                <div><span class="text-slate-500">Tenant:</span> <span x-text="screenshotMeta?.tenant || '—'"></span></div>
+                <div><span class="text-slate-500">Phone:</span> <span x-text="screenshotMeta?.phone || '—'"></span></div>
+                <div><span class="text-slate-500">Type:</span> <span x-text="screenshotMeta?.type || '—'"></span></div>
+                <div><span class="text-slate-500">Status:</span> <span x-text="screenshotMeta?.status || '—'"></span></div>
+                <div class="col-span-2"><span class="text-slate-500">Sent At:</span> <span x-text="screenshotMeta?.sentAt || '—'"></span></div>
+            </div>
+            <img :src="screenshotData" class="w-full rounded-lg border border-slate-700" alt="WhatsApp send proof">
+            <a :href="screenshotData" download="whatsapp-send-proof.png" class="block w-full text-center px-4 py-3 bg-indigo-600 rounded-lg hover:bg-indigo-500 font-medium text-sm">Download</a>
         </div>
     </div>
 
@@ -2462,6 +2494,9 @@
                 reminderLog: [],
                 reminderLogSummary: {},
                 reminderLogBatch: null,
+                showScreenshotModal: false,
+                screenshotData: null,
+                screenshotMeta: null,
                 get anyModalOpen() {
                     return this.showAddTenantModal || this.showEditTenantModal || this.showAddPropertyModal ||
                         this.showEditPropertyModal || this.showAddRoomModal || this.showEditRoomModal ||
@@ -3191,7 +3226,7 @@ totalTenantPages() {
                                     amount_due: remaining,
                                     note: (this.newPayment.payment_type === 'DEPOSIT' ? 'Deposit balance' : 'Balance after part payment'),
                                     rem_type: this.newPayment.payment_type.toLowerCase(),
-                                    paid_amount: Number(this.paymentTotal) || 0,
+                                    paid_amount: Number(this.newPayment.amount) || 0,
                                     paid_date: this.newPayment.payment_date
                                 })
                             });
@@ -3795,6 +3830,12 @@ totalTenantPages() {
                 async openReminderSendLogModal() {
                     this.showReminderLogModal = true;
                     await this.fetchReminderLog();
+                },
+                viewScreenshot(row) {
+                    if (!row || !row.screenshot) return;
+                    this.screenshotData = 'data:image/png;base64,' + row.screenshot;
+                    this.screenshotMeta = { tenant: row.tenant_id, phone: row.phone_number, type: row.send_type, status: row.status, sentAt: row.sent_at ? String(row.sent_at).slice(0,19) : '' };
+                    this.showScreenshotModal = true;
                 },
                 formatReminderDate(d, status) {
                     if (!d) return status === 'NOT_SET' ? 'Not Set' : '—';
