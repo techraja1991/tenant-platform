@@ -3192,6 +3192,8 @@ totalTenantPages() {
                             this.toast('Payment saved, but setting the due date failed: ' + e.message, 'warn', 5000);
                         }
                     }
+                    // Trigger instant NOTIFY dispatch for any queued reminder messages
+                    try { await fetch('/api/operations/send-due-reminders', { method: 'POST' }); } catch (e) {}
                 },
                 async openEditLedger(ledger) {
                     const res = await fetch('/api/payments?billing_month=' + ledger.billing_month);
