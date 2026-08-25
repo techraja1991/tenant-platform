@@ -148,7 +148,10 @@ def new_browser(user_data_dir=PROFILE_DIR, headed=None):
     # Use headed Chrome (less detectable) when a display is available (e.g.
     # running under xvfb-run); fall back to headless otherwise.
     if headed is None:
-        headed = os.environ.get("DISPLAY") is not None
+        # Always headless — session created + verified in headless mode.
+        # xvfb headed mode generates different fingerprint → session rejected
+        # by WhatsApp Web. Both "Send Now" and systemd timer must match.
+        headed = False
     pw = sync_playwright().start()
     context = pw.chromium.launch_persistent_context(
         user_data_dir=user_data_dir,
