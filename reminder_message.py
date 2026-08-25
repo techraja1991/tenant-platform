@@ -89,9 +89,9 @@ def reminder_payload(cur, reminder, rem_type='rent', paid_amount=None, paid_date
         if "amount" in lines:
             lines["amount"] = f"Pending deposit to be paid : Rs. {amount}"
     else:
-        lines["due"] = f"Your New Next Due Date is : {rdate} — Rs. {amount}"
+        lines["due"] = f"Next pending due date for pending rent : {rdate} — Rs. {amount}"
         if "payment" in lines:
-            lines["amount"] = f"Remaining rent to be paid : Rs. {amount}"
+            lines["amount"] = f"Pending rent to be paid : Rs. {amount}"
 
     # Build message order
     msg_parts = [lines["header"]]
