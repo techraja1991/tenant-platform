@@ -2090,19 +2090,23 @@ def set_reminder(data: ReminderSet):
         else:
             amount_due = data.amount_due
 
-        # supersede previous ACTIVE reminders for the same tenant+month
+        # supersede previous ACTIVE reminders of the SAME TYPE only
+        # (a deposit due-date must not kill an ACTIVE rent reminder and
+        # vice-versa — both can legitimately coexist for one month)
         cur.execute("""
             UPDATE rental_core.tenant_reminders
                SET status = 'SUPERSEDED', updated_at = now()
              WHERE tenant_id = %s AND billing_month = %s AND status = 'ACTIVE'
-        """, (data.tenant_id, data.billing_month))
+               AND COALESCE(rem_type, 'rent') = %s
+        """, (data.tenant_id, data.billing_month, data.rem_type or 'rent'))
 
         cur.execute("""
             INSERT INTO rental_core.tenant_reminders
-            (tenant_id, billing_month, reminder_date, amount_due, note)
-            VALUES (%s, %s, %s, %s, %s)
+            (tenant_id, billing_month, reminder_date, amount_due, note, rem_type)
+            VALUES (%s, %s, %s, %s, %s, %s)
             RETURNING *
-        """, (data.tenant_id, data.billing_month, reminder_date, amount_due, data.note or ""))
+        """, (data.tenant_id, data.billing_month, reminder_date, amount_due,
+              data.note or "", data.rem_type or 'rent'))
         reminder = cur.fetchone()
 
         # queue NOTIFY message (type-aware + payment ack)

@@ -217,6 +217,18 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
         page.wait_for_selector(SELECTOR_CHAT_LIST, timeout=60000)
     except Exception:
         print("❌ Not logged in. Run: python send_whatsapp_reminders.py --login")
+        # Leave originals QUEUED (auto-retry after re-login) but record a
+        # SKIPPED row per item so the GUI log shows WHY nothing was sent.
+        try:
+            for sk in items:
+                rem2 = {
+                    "id": sk["reminder_id"], "tenant_id": sk["tenant_id"],
+                    "phone_number": sk["phone_number"], "billing_month": sk["billing_month"],
+                }
+                log_reminder_send(_BATCH, rem2, sk["send_type"], sk.get("message"),
+                                  "SKIPPED", error="WhatsApp Web not logged in - session expired")
+        except Exception:
+            pass
         context.close()
         pw.stop()
         sys.exit(2)

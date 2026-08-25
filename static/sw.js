@@ -3,7 +3,7 @@
    - Local pages/static: network-first with cache fallback (offline shell)
    - CDN assets (Tailwind/Alpine/FontAwesome): stale-while-revalidate
 */
-const VERSION = 'v19-20260825';
+const VERSION = 'v20-20260825';
 const PAGE_CACHE = `ra-page-${VERSION}`;
 const STATIC_CACHE = `ra-static-${VERSION}`;
 const CDN_HOSTS = ['cdn.tailwindcss.com', 'cdn.jsdelivr.net', 'cdnjs.cloudflare.com'];
