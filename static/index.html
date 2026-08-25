@@ -3734,23 +3734,40 @@ totalTenantPages() {
                     });
                     const body = await res.json().catch(() => ({}));
                     if (!res.ok) { this.reminderError = body.detail || 'Failed to save due date.'; return; }
+
+                    // Close modal + refresh list
                     this.showReminderModal = false;
                     await this.fetchReminders();
-                    alert('Due date saved. Confirmation message queued:\n\n' + (body.message || ''));
+
+                    // Trigger instant NOTIFY dispatch — sends the WhatsApp
+                    // confirmation message right away (not waiting for 10 AM timer)
+                    let notifySent = false;
+                    try {
+                        await fetch('/api/operations/send-due-reminders', { method: 'POST' });
+                        notifySent = true;
+                    } catch (e) { /* NOTIFY still queued; will send at next timer run */ }
+
+                    this.toast(
+                        'Due date saved ✅\n' +
+                        (notifySent
+                            ? 'NOTIFY sent instantly via WhatsApp.'
+                            : 'NOTIFY queued — will send at next scheduled run.'),
+                        'success', 5000
+                    );
                 },
                 async deleteReminder(r) {
                     if (!confirm(`Delete the due date for ${r.tenant_name} (${r.reminder_date})?`)) return;
                     const res = await fetch(`/api/reminders/${r.id}`, { method: 'DELETE' });
-                    if (!res.ok) { const b = await res.json().catch(() => ({})); alert(b.detail || 'Failed to delete.'); return; }
+                    if (!res.ok) { const b = await res.json().catch(() => ({})); this.toast(b.detail || 'Failed to delete.', 'error'); return; }
                     this.fetchReminders();
                 },
                 async triggerDueReminders() {
-                    if (!confirm('Send due-date reminders now? This opens WhatsApp Web and sends NOTIFY (set confirmation), D-1 (day before) and DUE (on date) messages for due dates that are not yet sent.')) return;
+                    if (!confirm('Send due-date reminders now? This sends NOTIFY (set confirmation), D-1 (day before) and DUE (on date) WhatsApp messages for all pending reminders.')) return;
                     this.dueRemindersRunning = true;
                     try {
                         const res = await fetch('/api/operations/send-due-reminders', { method: 'POST' });
                         const body = await res.json().catch(() => ({}));
-                        alert(body.message || 'Due-date reminder sender queued in background.');
+                        this.toast(body.message || 'Reminder sender triggered.', 'info', 4000);
                         setTimeout(() => this.fetchReminders(), 5000);
                     } finally {
                         this.dueRemindersRunning = false;
