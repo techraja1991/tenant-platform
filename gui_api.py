@@ -2160,6 +2160,17 @@ def set_reminder(data: ReminderSet):
                AND COALESCE(rem_type, 'rent') = %s
         """, (data.tenant_id, data.billing_month, data.rem_type or 'rent'))
 
+        # cancel now-orphaned QUEUED notifications of superseded reminders so
+        # no phantom QUEUED entries linger in the send log
+        cur.execute("""
+            UPDATE rental_core.reminder_send_log l
+               SET status = 'CANCELLED', error = 'superseded by newer reminder of same type'
+              FROM rental_core.tenant_reminders r
+             WHERE l.reminder_id = r.id AND l.status = 'QUEUED'
+               AND r.status = 'SUPERSEDED' AND r.tenant_id = %s
+               AND COALESCE(r.rem_type, 'rent') = %s
+        """, (data.tenant_id, data.rem_type or 'rent'))
+
         cur.execute("""
             INSERT INTO rental_core.tenant_reminders
             (tenant_id, billing_month, reminder_date, amount_due, note, rem_type)

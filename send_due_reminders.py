@@ -263,18 +263,21 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
             # the chat pane (#main). Checking only the composer being cleared
             # is NOT enough — a failed paste also leaves it empty.
             import time as _t
+            import re as _re
             _t.sleep(random.uniform(0.5, 1.0))
-            snippet = ' '.join(it["message"].split())[-45:]
+            # Compare alphanumeric-only lowercase tails: immune to WhatsApp
+            # bold/italic markup, emoji, punctuation and whitespace variants.
+            target = _re.sub(r'[^a-z0-9]', '', it["message"].lower())[-60:]
             try:
                 page.wait_for_function(
                     """(snip) => {
                         const main = document.querySelector('#main');
                         if (!main) return false;
-                        const txt = (main.innerText || '').replace(/\\s+/g, ' ');
-                        return txt.includes(snip);
+                        const norm = (main.innerText || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+                        return norm.includes(snip);
                     }""",
-                    arg=snippet,
-                    timeout=20000,
+                    arg=target,
+                    timeout=25000,
                 )
                 delivered = True
             except Exception:
@@ -305,6 +308,8 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
             else:
                 log_reminder_send(_BATCH, reminder, it["send_type"], it["message"], "FAILED",
                                   error="Delivery not confirmed in chat", screenshot_b64=screenshot_b64)
+                if it.get("log_id"):
+                    _mark_log_failed(it["log_id"], "Delivery not confirmed in chat")
                 failed += 1
                 print(f"   ❌ Delivery unconfirmed for tenant {it['tenant_id']}")
         except Exception as e:
@@ -323,6 +328,21 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
     print(f"\n📊 Summary: sent={sent} failed={failed} skipped={skipped}")
     print("SEND_REPORT " + json.dumps({"batch_id": _BATCH, "sent": sent,
                                        "failed": failed, "skipped": skipped}))
+
+
+def _mark_log_failed(log_id, error):
+    """Terminal FAILED on the original queued row — prevents drain-loop
+    re-picks (duplicate sends) and phantom QUEUED entries."""
+    conn = get_db_connection(as_dict=True)
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE rental_core.reminder_send_log
+           SET status = 'FAILED', error = %s, sent_at = now()
+         WHERE id = %s AND status = 'QUEUED'
+    """, (error, log_id))
+    conn.commit()
+    cur.close()
+    conn.close()
 
 
 def _mark_log_sent(log_id):
