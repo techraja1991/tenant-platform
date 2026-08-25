@@ -1986,6 +1986,8 @@ class ReminderSet(BaseModel):
     amount_due: Optional[float] = Field(default=None, ge=0)
     note: Optional[str] = None
     rem_type: Optional[str] = Field(default='rent', pattern="^(rent|deposit)$")
+    paid_amount: Optional[float] = Field(default=None, ge=0)
+    paid_date: Optional[str] = None
 
 
 class ReminderSchedule(BaseModel):
@@ -2103,8 +2105,11 @@ def set_reminder(data: ReminderSet):
         """, (data.tenant_id, data.billing_month, reminder_date, amount_due, data.note or ""))
         reminder = cur.fetchone()
 
-        # queue NOTIFY message
-        payload = rm.reminder_payload(cur, reminder)
+        # queue NOTIFY message (type-aware + payment ack)
+        payload = rm.reminder_payload(cur, reminder,
+                                      rem_type=data.rem_type or 'rent',
+                                      paid_amount=data.paid_amount,
+                                      paid_date=data.paid_date)
         cur.execute("""
             INSERT INTO rental_core.reminder_send_log
             (batch_id, reminder_id, tenant_id, phone_number, send_type,

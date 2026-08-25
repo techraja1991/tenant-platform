@@ -55,8 +55,10 @@ def _tenant(cur, tenant_id):
     return row
 
 
-def reminder_payload(cur, reminder):
-    """Build NOTIFY/D1/DUE messages for one tenant_reminders row."""
+def reminder_payload(cur, reminder, rem_type='rent', paid_amount=None, paid_date=None):
+    """Build NOTIFY/D1/DUE messages for one tenant_reminders row.
+    Type-aware: rent vs security deposit. When paid_amount is provided,
+    includes a payment acknowledgment line."""
     tenant = _tenant(cur, reminder['tenant_id'])
     name = tenant['tenant_name']
     address = tenant['display_address'] or ""
@@ -66,12 +68,39 @@ def reminder_payload(cur, reminder):
     header = f"{name}"
     if address:
         header += f" ({address})"
+
+    type_label = "Security Deposit" if rem_type == 'deposit' else "Rent"
+
     lines = {
         "header": header,
         "month": f"Billing Month : {month}",
         "due": f"Your New Next Due Date is : {rdate}",
         "amount": f"Amount to be paid : Rs. {amount}",
     }
+
+    # Payment acknowledgment (when set from Record Payment flow)
+    if paid_amount is not None and paid_amount > 0:
+        pd = paid_date or ""
+        lines["payment"] = f"Your amount for {type_label.lower()} received today : {pd} — Rs. {float(paid_amount):,.0f}"
+
+    # Type-aware due line
+    if rem_type == 'deposit':
+        lines["due"] = f"Next pending due date for security deposit : {rdate} — Rs. {amount}"
+        if "amount" in lines:
+            lines["amount"] = f"Pending deposit to be paid : Rs. {amount}"
+    else:
+        lines["due"] = f"Your New Next Due Date is : {rdate} — Rs. {amount}"
+        if "payment" in lines:
+            lines["amount"] = f"Remaining rent to be paid : Rs. {amount}"
+
+    # Build message order
+    msg_parts = [lines["header"]]
+    if "payment" in lines:
+        msg_parts.append(lines["payment"])
+    msg_parts.append(lines["due"])
+    if lines["amount"] not in msg_parts:
+        msg_parts.append(lines["amount"])
+
     hisab = None
     try:
         hisab, _, _ = wm.render_message(cur, reminder['tenant_id'], reminder['billing_month'])
@@ -85,7 +114,7 @@ def reminder_payload(cur, reminder):
         "billing_month": reminder['billing_month'],
         "reminder_date": str(reminder['reminder_date'])[:10],
         "amount_due": reminder.get('amount_due'),
-        "notify": "\n".join([lines["header"], lines["due"], lines["amount"]]),
+        "notify": "\n".join(msg_parts),
         "d1": "\n".join([lines["header"],
                          f"Reminder: Your due date is TOMORROW, {rdate}.",
                          lines["month"], lines["amount"]]),

@@ -2987,16 +2987,22 @@ totalTenantPages() {
                 },
                 get paymentReminderPreview() {
                     const p = this.newPayment;
-                    if (!p.due_date || !(this.remainingAfterPayment > 0)) return '';
+                    if (!p.due_date || !(this.remainingAfterPayment !== 0)) return '';
                     const t = this.activeTenants.find(x => Number(x.id) === Number(p.tenant_id));
                     const nm = (t && t.display_address ? t.display_address + ' — ' : '') + (t ? t.tenant_name : '');
-                    if (p.payment_type === 'DEPOSIT') {
-                        return 'SECURITY DEPOSIT REMINDER\n' + nm +
-                               '\nYour deposit due date is : ' + p.due_date +
-                               '\nRemaining deposit to be paid : Rs. ' + Number(this.remainingAfterPayment).toLocaleString('en-IN');
+                    const rem = this.remainingAfterPayment;
+                    const typeLabel = p.payment_type === 'DEPOSIT' ? 'security deposit' : 'rent';
+                    const paid = this.paymentTotal || 0;
+                    let msg = '';
+                    if (paid > 0) {
+                        msg += 'Your amount for ' + typeLabel + ' received today : ' + p.payment_date + ' — Rs. ' + Number(paid).toLocaleString('en-IN') + '\n';
                     }
-                    return nm + '\nYour New Next Due Date is : ' + p.due_date +
-                           '\nAmount to be paid : Rs. ' + Number(this.remainingAfterPayment).toLocaleString('en-IN');
+                    if (rem > 0) {
+                        msg += (typeLabel === 'deposit' ? 'Next pending due date for security deposit : ' : 'Next pending due date for pending rent : ') + p.due_date + ' — Rs. ' + Number(Math.abs(rem)).toLocaleString('en-IN');
+                    } else {
+                        msg += typeLabel.charAt(0).toUpperCase() + typeLabel.slice(1) + ' fully cleared ✅';
+                    }
+                    return msg;
                 },
                 paginatedTenants() {
                     const start = (this.tenantCurrentPage - 1) * this.itemsPerPage;
@@ -3183,7 +3189,10 @@ totalTenantPages() {
                                     billing_month: this.newPayment.payment_type === 'DEPOSIT' ? this.currentBillingPeriod() : (this.newPayment.allocations.find(a => Number(a.amount) > 0)?.billing_month || this.newPayment.billing_month),
                                     reminder_date: this.newPayment.due_date,
                                     amount_due: remaining,
-                                    note: (this.newPayment.payment_type === 'DEPOSIT' ? 'Deposit balance' : 'Balance after part payment')
+                                    note: (this.newPayment.payment_type === 'DEPOSIT' ? 'Deposit balance' : 'Balance after part payment'),
+                                    rem_type: this.newPayment.payment_type.toLowerCase(),
+                                    paid_amount: Number(this.paymentTotal) || 0,
+                                    paid_date: this.newPayment.payment_date
                                 })
                             });
                             this.toast('Payment saved. Due date set for balance ₹' + Number(remaining).toLocaleString('en-IN') + '.', 'success', 5000);
