@@ -80,7 +80,7 @@ def reminder_payload(cur, reminder, rem_type='rent', paid_amount=None, paid_date
 
     # Payment acknowledgment (when set from Record Payment flow)
     if paid_amount is not None and paid_amount > 0:
-        pd = paid_date or ""
+        pd = _fmt_date(paid_date) if paid_date else ""
         lines["payment"] = f"Your amount for {type_label.lower()} received today : {pd} — Rs. {float(paid_amount):,.0f}"
 
     # Type-aware due line

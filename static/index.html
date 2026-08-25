@@ -2464,12 +2464,14 @@
                               this.tenants.find(x => Number(x.id) === Number(f.tenant_id));
                     const amt = (f.amount_due !== null && f.amount_due !== '') ? f.amount_due : (f.outstanding || 0);
                     const nm = ((t && t.display_address) ? t.display_address + '\u2014' : '') + (t ? t.tenant_name : '');
+                    const [ry, rm, rd] = String(f.reminder_date).slice(0,10).split('-');
+                    const rdFmt = `${rd}-${rm}-${ry}`;
                     if (f.rem_type === 'deposit') {
                         return 'SECURITY DEPOSIT REMINDER\n' + nm +
-                               '\nYour deposit due date is : ' + f.reminder_date +
+                               '\nYour deposit due date is : ' + rdFmt +
                                '\nRemaining deposit to be paid : Rs. ' + Number(amt).toLocaleString('en-IN');
                     }
-                    return nm + '\nYour New Next Due Date is : ' + f.reminder_date +
+                    return nm + '\nYour New Next Due Date is : ' + rdFmt +
                            '\nAmount to be paid : Rs. ' + Number(amt).toLocaleString('en-IN');
                 },
                 reminderTenantName(tid) {
@@ -3030,7 +3032,8 @@ totalTenantPages() {
                     const paid = this.paymentTotal || 0;
                     let msg = '';
                     if (paid > 0) {
-                        msg += 'Your amount for ' + typeLabel + ' received today : ' + p.payment_date + ' — Rs. ' + Number(paid).toLocaleString('en-IN') + '\n';
+                        const pdFmt = p.payment_date ? (()=>{const [y,m,d]=String(p.payment_date).slice(0,10).split('-'); return d+'-'+m+'-'+y;})() : '';
+                        msg += 'Your amount for ' + typeLabel + ' received today : ' + pdFmt + ' — Rs. ' + Number(paid).toLocaleString('en-IN') + '\n';
                     }
                     if (rem > 0) {
                         msg += (typeLabel === 'deposit' ? 'Next pending due date for security deposit : ' : 'Next pending due date for pending rent : ') + p.due_date + ' — Rs. ' + Number(Math.abs(rem)).toLocaleString('en-IN');
