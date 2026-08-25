@@ -19,6 +19,90 @@ from db_config import get_db_connection
 import whatsapp_message as wm
 
 
+# ---------------------------------------------------------------------------
+# Template master: DB-backed, editable from GUI. Placeholders use {curlies}
+# and are substituted with plain str.replace (unknown placeholders stay).
+# ---------------------------------------------------------------------------
+TEMPLATE_DEFAULTS = {
+    "notify_paid_rent": (
+        "{header}\n"
+        "Your amount for rent received today : {paid_date} — Rs. {paid_amount}\n"
+        "Next pending due date for pending rent : {due_date} — Rs. {amount}\n"
+        "Pending rent to be paid : Rs. {amount}"
+    ),
+    "notify_paid_deposit": (
+        "{header}\n"
+        "Your amount for security deposit received today : {paid_date} — Rs. {paid_amount}\n"
+        "Next pending due date for security deposit : {due_date} — Rs. {amount}\n"
+        "Pending deposit to be paid : Rs. {amount}"
+    ),
+    "notify_set_rent": (
+        "{header}\n"
+        "Your New Next Due Date is : {due_date} — Rs. {amount}\n"
+        "Amount to be paid : Rs. {amount}"
+    ),
+    "notify_set_deposit": (
+        "{header}\n"
+        "Your New Next Deposit Due Date is : {due_date} — Rs. {amount}\n"
+        "Deposit to be paid : Rs. {amount}"
+    ),
+    "d1_rent": (
+        "{header}\n"
+        "Reminder: Your RENT due date is TOMORROW, {due_date}.\n"
+        "Due amount : Rs. {amount}"
+    ),
+    "due_rent": (
+        "{header}\n"
+        "Reminder: Your RENT due date is TODAY, {due_date}.\n"
+        "Due amount : Rs. {amount}"
+    ),
+    "d1_deposit": (
+        "{header}\n"
+        "Reminder: Your SECURITY DEPOSIT due date is TOMORROW, {due_date}.\n"
+        "Due amount : Rs. {amount}"
+    ),
+    "due_deposit": (
+        "{header}\n"
+        "Reminder: Your SECURITY DEPOSIT due date is TODAY, {due_date}.\n"
+        "Due amount : Rs. {amount}"
+    ),
+}
+
+_tpl_cache = {}
+
+
+def get_template(key):
+    """Fetch a reminder template body; falls back to built-in default."""
+    if key in _tpl_cache:
+        return _tpl_cache[key]
+    body = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT body FROM rental_core.reminder_templates WHERE key = %s", (key,))
+        row = cur.fetchone()
+        cur.close(); conn.close()
+        body = row[0] if row else None
+    except Exception:
+        body = None
+    if not body:
+        body = TEMPLATE_DEFAULTS.get(key, "")
+    _tpl_cache[key] = body
+    return body
+
+
+def invalidate_template_cache():
+    _tpl_cache.clear()
+
+
+def render_template(key, **vals):
+    body = get_template(key)
+    out = body
+    for k, v in (vals or {}).items():
+        out = out.replace("{" + k + "}", str(v))
+    return out
+
+
 def _fmt_amount(v):
     v = float(v or 0.0)
     if v == int(v):
@@ -57,8 +141,11 @@ def _tenant(cur, tenant_id):
 
 def reminder_payload(cur, reminder, rem_type='rent', paid_amount=None, paid_date=None):
     """Build NOTIFY/D1/DUE messages for one tenant_reminders row.
-    Type-aware: rent vs security deposit. When paid_amount is provided,
-    includes a payment acknowledgment line."""
+
+    All wording comes from the DB template master (reminder_templates),
+    keyed by kind x type: notify_paid_<type>, notify_set_<type>,
+    d1_<type>, due_<type>. D-day for rent additionally carries the full
+    hisab message (sent as a separate HISAB item by the sender)."""
     tenant = _tenant(cur, reminder['tenant_id'])
     name = tenant['tenant_name']
     address = tenant['display_address'] or ""
@@ -69,37 +156,26 @@ def reminder_payload(cur, reminder, rem_type='rent', paid_amount=None, paid_date
     if address:
         header += f" ({address})"
 
-    type_label = "Security Deposit" if rem_type == 'deposit' else "Rent"
-
-    lines = {
+    vals = {
         "header": header,
-        "month": f"Billing Month : {month}",
-        "due": f"Your New Next Due Date is : {rdate}",
-        "amount": f"Amount to be paid : Rs. {amount}",
+        "name": name,
+        "address": address,
+        "due_date": rdate,
+        "amount": amount,
+        "month": month,
+        "paid_date": _fmt_date(paid_date) if paid_date else "",
+        "paid_amount": f"{float(paid_amount):,.0f}" if paid_amount else "",
     }
 
-    # Payment acknowledgment (when set from Record Payment flow)
-    if paid_amount is not None and paid_amount > 0:
-        pd = _fmt_date(paid_date) if paid_date else ""
-        lines["payment"] = f"Your amount for {type_label.lower()} received today : {pd} — Rs. {float(paid_amount):,.0f}"
-
-    # Type-aware due line
-    if rem_type == 'deposit':
-        lines["due"] = f"Next pending due date for security deposit : {rdate} — Rs. {amount}"
-        if "amount" in lines:
-            lines["amount"] = f"Pending deposit to be paid : Rs. {amount}"
+    # NOTIFY: payment acknowledgment vs plain due-date set
+    if paid_amount is not None and float(paid_amount) > 0:
+        notify = render_template(f"notify_paid_{rem_type}", **vals)
     else:
-        lines["due"] = f"Next pending due date for pending rent : {rdate} — Rs. {amount}"
-        if "payment" in lines:
-            lines["amount"] = f"Pending rent to be paid : Rs. {amount}"
+        notify = render_template(f"notify_set_{rem_type}", **vals)
 
-    # Build message order
-    msg_parts = [lines["header"]]
-    if "payment" in lines:
-        msg_parts.append(lines["payment"])
-    msg_parts.append(lines["due"])
-    if lines["amount"] not in msg_parts:
-        msg_parts.append(lines["amount"])
+    # D1 / DUE: date + amount + type only
+    d1 = render_template(f"d1_{rem_type}", **vals)
+    due = render_template(f"due_{rem_type}", **vals)
 
     hisab = None
     try:
@@ -114,16 +190,11 @@ def reminder_payload(cur, reminder, rem_type='rent', paid_amount=None, paid_date
         "billing_month": reminder['billing_month'],
         "reminder_date": str(reminder['reminder_date'])[:10],
         "amount_due": reminder.get('amount_due'),
-        "notify": "\n".join(msg_parts),
-        "d1": "\n".join([lines["header"],
-                         f"Reminder: Your due date is TOMORROW, {rdate}.",
-                         lines["month"], lines["amount"]]),
-        "due": "\n".join([lines["header"],
-                          f"Reminder: Your due date is TODAY, {rdate}.",
-                          lines["month"], lines["amount"]]),
+        "notify": notify,
+        "d1": d1,
+        "due": due,
         "hisab": hisab,
-        "wa_link": wm.wa_link(tenant['phone_number'],
-                              "\n".join([lines["header"], lines["due"], lines["amount"]])),
+        "wa_link": wm.wa_link(tenant['phone_number'], notify),
     }
 
 

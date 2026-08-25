@@ -1053,7 +1053,35 @@
                 <button @click="openAddTemplateModal()" class="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-3 lg:py-2 rounded-lg font-medium text-sm"><i class="fa-solid fa-plus lg:hidden"></i><span class="hidden lg:inline">+ New Template</span></button>
             </div>
 
-            <div class="bg-slate-900 rounded-xl border border-slate-800 p-3 text-[11px] sm:text-xs text-slate-500"><i class="fa-solid fa-circle-info mr-1 text-indigo-400"></i>Placeholders: <code>{name}</code>, <code>{address}</code>, <code>{month}</code>, <code>{prev_month}</code>, <code>{prev_baki}</code>, <code>{prev_jama}</code>, <code>{bhadu}</code>, <code>{light_bill}</code>, <code>{gas_bill}</code>, <code>{maintenance}</code>, <code>{misc}</code>, <code>{month_total}</code>, <code>{gross_baki}</code>, <code>{jama}</code>, <code>{jama_date}</code>, <code>{new_baki}</code>. Default template is used for tenants without a mapping.</div>
+            <!-- REMINDER MESSAGE TEMPLATE MASTER -->
+            <div class="bg-slate-900 rounded-xl border border-slate-800 p-4 space-y-3">
+                <div class="flex justify-between items-center flex-wrap gap-2">
+                    <h2 class="font-bold text-sm uppercase tracking-wide text-indigo-300"><i class="fa-solid fa-bell mr-1"></i>Reminder Message Templates</h2>
+                    <button @click="saveReminderTemplates()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg font-medium text-sm"><i class="fa-solid fa-floppy-disk mr-1"></i>Save All</button>
+                </div>
+                <p class="text-[11px] text-slate-500">Placeholders: <code>{header}</code> <code>{name}</code> <code>{address}</code> <code>{due_date}</code> <code>{amount}</code> <code>{paid_date}</code> <code>{paid_amount}</code> <code>{month}</code>. Payment-Accepted messages fire when a payment is saved with a due date; D-1/D-Day are the scheduled reminders; on D-Day for RENT the full hisab is sent separately.</p>
+                <template x-for="grp in reminderTemplateGroups" :key="grp.label">
+                    <div class="space-y-2">
+                        <div class="text-xs font-semibold text-slate-400 pt-1" x-text="grp.label"></div>
+                        <div class="grid md:grid-cols-2 gap-3">
+                            <template x-for="t in grp.items" :key="t.key">
+                                <div class="bg-slate-800/50 border rounded-lg p-3 space-y-2" :class="(remTplEdits[t.key] !== undefined) ? 'border-amber-600' : 'border-slate-700'">
+                                    <div class="flex items-center justify-between">
+                                        <span class="text-xs font-bold" :class="t.key.includes('deposit') ? 'text-purple-300' : 'text-indigo-300'" x-text="t.title"></span>
+                                        <div class="flex items-center gap-2">
+                                            <span x-show="t.is_custom && remTplEdits[t.key] === undefined" class="text-[10px] bg-emerald-500/20 text-emerald-400 px-1.5 py-0.5 rounded">customized</span>
+                                            <button @click="resetReminderTemplate(t)" x-show="t.is_custom || remTplEdits[t.key] !== undefined" class="text-[10px] text-slate-400 hover:text-rose-300"><i class="fa-solid fa-rotate-left"></i> reset</button>
+                                        </div>
+                                    </div>
+                                    <textarea rows="5" class="w-full bg-slate-900 border border-slate-700 rounded p-2 font-mono text-[11px]" x-model="remTplEdits[t.key]" :placeholder="t.body"></textarea>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </template>
+            </div>
+
+            <div class="bg-slate-900 rounded-xl border border-slate-800 p-3 text-[11px] sm:text-xs text-slate-500"><i class="fa-solid fa-circle-info mr-1 text-indigo-400"></i>Hisab template placeholders: <code>{name}</code>, <code>{address}</code>, <code>{month}</code>, <code>{prev_month}</code>, <code>{prev_baki}</code>, <code>{prev_jama}</code>, <code>{bhadu}</code>, <code>{light_bill}</code>, <code>{gas_bill}</code>, <code>{maintenance}</code>, <code>{misc}</code>, <code>{month_total}</code>, <code>{gross_baki}</code>, <code>{jama}</code>, <code>{jama_date}</code>, <code>{new_baki}</code>. Default template is used for tenants without a mapping.</div>
 
             <!-- mobile template cards -->
             <div class="lg:hidden space-y-3">
@@ -2460,6 +2488,28 @@
                 kpiTitle: '',
                 kpiData: null,
                 templates: [],
+                reminderTemplates: [],
+                remTplEdits: {},
+                get reminderTemplateGroups() {
+                    const titles = {
+                        notify_paid_rent: 'Payment Accepted — RENT', notify_paid_deposit: 'Payment Accepted — DEPOSIT',
+                        notify_set_rent: 'Due Date Set (no payment) — RENT', notify_set_deposit: 'Due Date Set (no payment) — DEPOSIT',
+                        d1_rent: 'D-1 Reminder — RENT', d1_deposit: 'D-1 Reminder — DEPOSIT',
+                        due_rent: 'D-Day Reminder — RENT', due_deposit: 'D-Day Reminder — DEPOSIT'
+                    };
+                    const groups = [
+                        { label: 'Instant notification on Payment Accepted', keys: ['notify_paid_rent', 'notify_paid_deposit'] },
+                        { label: 'Notification on Due Date Set (without payment)', keys: ['notify_set_rent', 'notify_set_deposit'] },
+                        { label: 'Scheduled reminders (date + amount + type only)', keys: ['d1_rent', 'd1_deposit', 'due_rent', 'due_deposit'] }
+                    ];
+                    return groups.map(g => ({
+                        label: g.label,
+                        items: g.keys.map(k => {
+                            const t = this.reminderTemplates.find(x => x.key === k) || { key: k, body: '', is_custom: false };
+                            return { ...t, title: titles[k] || k };
+                        })
+                    }));
+                },
                 showTemplateModal: false,
                 showMappingModal: false,
                 templateForm: { id: null, template_name: '', template_type: 'REMINDER', body: '', note: '', signature: '', is_active: 'Y', is_default: 'N' },
@@ -2629,7 +2679,7 @@
                         else if (t === 'properties') this.fetchProperties();
                         else if (t === 'expenses') this.fetchExpenseMeta();
                         else if (t === 'payments') this.fetchDeposits();
-                        else if (t === 'templates') this.fetchTemplates();
+                        else if (t === 'templates') { this.fetchTemplates(); this.fetchReminderTemplates(); }
                         else if (t === 'reminders') this.fetchReminders();
                     });
 
@@ -3546,6 +3596,37 @@ totalTenantPages() {
                 async fetchTemplates() {
                     const res = await fetch('/api/templates');
                     this.templates = await res.json();
+                },
+                async fetchReminderTemplates() {
+                    const res = await fetch('/api/reminder-templates');
+                    this.reminderTemplates = await res.json().catch(() => []);
+                    const edits = {};
+                    for (const k in this.remTplEdits) {
+                        if (this.remTplEdits[k] !== undefined && this.remTplEdits[k] !== null) edits[k] = this.remTplEdits[k];
+                    }
+                    this.remTplEdits = edits;
+                },
+                async saveReminderTemplates() {
+                    const payload = {};
+                    let dirty = 0;
+                    for (const t of this.reminderTemplates) {
+                        const v = this.remTplEdits[t.key];
+                        if (v !== undefined && v !== null && v !== t.body) { payload[t.key] = v; dirty++; }
+                    }
+                    if (!dirty) { this.toast('No changes to save.', 'info'); return; }
+                    const res = await fetch('/api/reminder-templates', {
+                        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ templates: payload })
+                    });
+                    if (!res.ok) { this.toast('Save failed.', 'error'); return; }
+                    await this.fetchReminderTemplates();
+                    this.toast(dirty + ' reminder template(s) saved. New messages will use them immediately.', 'success', 4500);
+                },
+                async resetReminderTemplate(t) {
+                    await fetch('/api/reminder-templates/reset?key=' + encodeURIComponent(t.key), { method: 'POST' });
+                    delete this.remTplEdits[t.key];
+                    await this.fetchReminderTemplates();
+                    this.toast('Reset to default wording.', 'success');
                 },
                 openAddTemplateModal() {
                     this.templateForm = { id: null, template_name: '', template_type: 'REMINDER', body: '', note: '', signature: '', is_active: 'Y', is_default: 'N' };

@@ -1995,6 +1995,66 @@ class ReminderSchedule(BaseModel):
     enabled: Optional[bool] = True
 
 
+@app.get("/api/reminder-templates")
+def get_reminder_templates():
+    """Template master: DB overrides merged over built-in defaults."""
+    from reminder_message import TEMPLATE_DEFAULTS
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT key, body, updated_at FROM rental_core.reminder_templates")
+    rows = {r['key']: r for r in cur.fetchall()}
+    cur.close(); conn.close()
+    out = []
+    for key, default_body in TEMPLATE_DEFAULTS.items():
+        r = rows.get(key)
+        out.append({
+            "key": key,
+            "body": (r['body'] if r else default_body),
+            "is_custom": bool(r and r['body'].strip() != default_body.strip()),
+            "updated_at": (str(r['updated_at'])[:19] if r else None),
+        })
+    return out
+
+
+class ReminderTemplatesUpdate(BaseModel):
+    templates: dict = Field(default_factory=dict)  # {key: body}
+
+
+@app.put("/api/reminder-templates")
+def put_reminder_templates(data: ReminderTemplatesUpdate):
+    from reminder_message import TEMPLATE_DEFAULTS, invalidate_template_cache
+    conn = get_db()
+    cur = conn.cursor()
+    saved = 0
+    for key, body in (data.templates or {}).items():
+        if key not in TEMPLATE_DEFAULTS:
+            continue  # never persist unknown keys
+        cur.execute("""
+            INSERT INTO rental_core.reminder_templates (key, body, updated_at)
+            VALUES (%s, %s, now())
+            ON CONFLICT (key) DO UPDATE SET body = EXCLUDED.body, updated_at = now()
+        """, (key, str(body)))
+        saved += 1
+    conn.commit()
+    cur.close(); conn.close()
+    invalidate_template_cache()
+    return {"status": "SUCCESS", "saved": saved}
+
+
+@app.post("/api/reminder-templates/reset")
+def reset_reminder_template(key: str):
+    """Delete override -> falls back to built-in default."""
+    from reminder_message import invalidate_template_cache
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM rental_core.reminder_templates WHERE key = %s", (key,))
+    deleted = cur.rowcount
+    conn.commit()
+    cur.close(); conn.close()
+    invalidate_template_cache()
+    return {"status": "SUCCESS", "reset": bool(deleted)}
+
+
 @app.get("/api/reminders/schedule")
 def get_reminder_schedule():
     """Admin-set master auto-send time + enabled flag."""
