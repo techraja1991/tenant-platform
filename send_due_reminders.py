@@ -339,18 +339,39 @@ def main():
     args = ap.parse_args()
 
     global _BATCH, _HEADED
-    _BATCH = datetime.now().strftime("%Y%m%d%H%M%S") + "_" + uuid.uuid4().hex[:6]
     _HEADED = args.headed
 
-    items = build_items(args.month)
-    print(f"🔎 Due-date reminder queue: {len(items)} message(s).")
-    if not items:
-        print("Nothing to send.")
-        return
-    if args.test_number and not args.dry_run and not args.limit:
-        args.limit = 1
-    send_items(items, args.min_delay, args.max_delay, args.dry_run, args.limit,
-               args.test_number, args.fast)
+    # Single-flight lock: two rapid triggers (e.g. deposit save followed
+    # instantly by rent save) each spawn a sender; both would open the same
+    # WhatsApp profile and the second would crash on the profile lock,
+    # silently dropping its queued messages. Block here instead — the second
+    # run waits for the first to finish, then picks up everything new.
+    import fcntl
+    lock_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".wa_sender.lock")
+    with open(lock_path, "w") as lock_f:
+        try:
+            fcntl.flock(lock_f, fcntl.LOCK_EX)
+        except OSError:
+            pass
+
+        try:
+            # Drain loop: messages can be queued while this run is still in
+            # progress (queue was built before the browser finished booting).
+            for _pass in range(3):
+                items = build_items(args.month)
+                print(f"🔎 Due-date reminder queue: {len(items)} message(s).")
+                if not items:
+                    print("Nothing to send.")
+                    return
+                if args.test_number and not args.dry_run and not args.limit:
+                    args.limit = 1
+                _BATCH = datetime.now().strftime("%Y%m%d%H%M%S") + "_" + uuid.uuid4().hex[:6]
+                send_items(items, args.min_delay, args.max_delay, args.dry_run, args.limit,
+                           args.test_number, args.fast)
+                if args.dry_run or (args.limit and args.limit <= 1):
+                    break
+        finally:
+            fcntl.flock(lock_f, fcntl.LOCK_UN)
 
 
 if __name__ == "__main__":

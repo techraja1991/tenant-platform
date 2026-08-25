@@ -28,3 +28,4 @@ static/whatsapp_qr_clean.png
 # HTML backups (snapshots kept in archive/, not tracked)
 static/index_backup_*
 archive/backups/
+.wa_sender.lock
