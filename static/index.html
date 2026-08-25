@@ -1184,7 +1184,7 @@
 
             <!-- mobile reminder cards -->
             <div class="lg:hidden space-y-3">
-                <template x-for="r in reminders" :key="r.id">
+                <template x-for="(r, ri) in reminders" :key="(r.tenant_id || 0) + '-' + (r.remType || 'rent') + '-' + (r.id || 0) + '-' + ri">
                     <div class="bg-slate-900 rounded-xl border border-slate-800 p-4" :class="r.status === 'SUPERSEDED' ? 'opacity-50' : ''">
                         <div class="flex items-start justify-between gap-2">
                             <div class="min-w-0">
@@ -1209,7 +1209,7 @@
                         <div x-show="r.note" class="text-xs text-slate-500 mt-2 truncate" x-text="r.note"></div>
                         <div class="flex justify-end items-center gap-3 mt-3 text-base">
                             <template x-if="r.status === 'NOT_SET'">
-                                <button @click="openSetReminderModalFor(r.tenant_id, r.amount_due)" class="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1"><i class="fa-solid fa-calendar-plus"></i> Set Due Date</button>
+                                <button @click="openSetReminderModalFor(r.tenant_id, r.amount_due, r.remType)" class="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1"><i class="fa-solid fa-calendar-plus"></i> Set Due Date</button>
                             </template>
                             <template x-if="r.status !== 'NOT_SET' && r.id !== null">
                                 <span class="flex gap-4">
@@ -1234,7 +1234,7 @@
                             </tr>
                         </thead>
                         <tbody class="divide-y divide-slate-800">
-                            <template x-for="r in reminders" :key="r.id">
+                            <template x-for="(r, ri) in reminders" :key="(r.tenant_id || 0) + '-' + (r.remType || 'rent') + '-' + (r.id || 0) + '-' + ri">
                                 <tr class="hover:bg-slate-800/40" :class="r.status === 'SUPERSEDED' ? 'opacity-50' : ''">
                                     <td class="p-3"><div class="font-semibold" x-text="r.tenant_name"></div><div class="text-xs text-slate-400" x-text="r.display_address || '—'"></div></td>
                                     <td class="p-3"><span class="px-2 py-0.5 rounded text-[10px] font-bold" 
@@ -1249,7 +1249,7 @@
                                     <td class="p-3 text-xs text-slate-400 max-w-[160px] truncate" x-text="r.note || '—'"></td>
                                     <td class="p-3 text-right whitespace-nowrap">
                                         <template x-if="r.status === 'NOT_SET'">
-                                            <button @click="openSetReminderModalFor(r.tenant_id, r.amount_due)" class="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-lg text-xs font-medium">Set Due Date</button>
+                                            <button @click="openSetReminderModalFor(r.tenant_id, r.amount_due, r.remType)" class="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-lg text-xs font-medium">Set Due Date</button>
                                         </template>
                                         <template x-if="r.status !== 'NOT_SET' && r.id !== null">
                                             <span>
@@ -3124,14 +3124,15 @@ totalTenantPages() {
                     const nm = (t && t.display_address ? t.display_address + ' — ' : '') + (t ? t.tenant_name : '');
                     const rem = this.remainingAfterPayment;
                     const typeLabel = p.payment_type === 'DEPOSIT' ? 'security deposit' : 'rent';
-                    const paid = this.paymentTotal || 0;
+                    const paid = p.payment_type === 'DEPOSIT' ? (Number(p.amount) || 0) : (this.paymentTotal || 0);
                     let msg = '';
+                    const dueFmt = p.due_date ? (()=>{const [y,m,d]=String(p.due_date).slice(0,10).split('-'); return d+'-'+m+'-'+y;})() : '';
                     if (paid > 0) {
                         const pdFmt = p.payment_date ? (()=>{const [y,m,d]=String(p.payment_date).slice(0,10).split('-'); return d+'-'+m+'-'+y;})() : '';
                         msg += 'Your amount for ' + typeLabel + ' received today : ' + pdFmt + ' — Rs. ' + Number(paid).toLocaleString('en-IN') + '\n';
                     }
                     if (rem > 0) {
-                        msg += (typeLabel === 'deposit' ? 'Next pending due date for security deposit : ' : 'Next pending due date for pending rent : ') + p.due_date + ' — Rs. ' + Number(Math.abs(rem)).toLocaleString('en-IN');
+                        msg += (typeLabel === 'deposit' ? 'Next pending due date for security deposit : ' : 'Next pending due date for pending rent : ') + dueFmt + ' — Rs. ' + Number(Math.abs(rem)).toLocaleString('en-IN');
                     } else {
                         msg += typeLabel.charAt(0).toUpperCase() + typeLabel.slice(1) + ' fully cleared ✅';
                     }
@@ -3324,7 +3325,7 @@ totalTenantPages() {
                                     amount_due: remaining,
                                     note: (this.newPayment.payment_type === 'DEPOSIT' ? 'Deposit balance' : 'Balance after part payment'),
                                     rem_type: this.newPayment.payment_type.toLowerCase(),
-                                    paid_amount: Number(this.newPayment.amount) || 0,
+                                    paid_amount: this.newPayment.payment_type === 'DEPOSIT' ? (Number(this.newPayment.amount) || 0) : (this.paymentTotal || 0),
                                     paid_date: this.newPayment.payment_date
                                 })
                             });
@@ -3600,10 +3601,9 @@ totalTenantPages() {
                 async fetchReminderTemplates() {
                     const res = await fetch('/api/reminder-templates');
                     this.reminderTemplates = await res.json().catch(() => []);
+                    // Pre-fill every editor box with the current effective text
                     const edits = {};
-                    for (const k in this.remTplEdits) {
-                        if (this.remTplEdits[k] !== undefined && this.remTplEdits[k] !== null) edits[k] = this.remTplEdits[k];
-                    }
+                    this.reminderTemplates.forEach(t => { edits[t.key] = t.body; });
                     this.remTplEdits = edits;
                 },
                 async saveReminderTemplates() {
@@ -3758,18 +3758,29 @@ totalTenantPages() {
                         if (res2.ok) eligible = await res2.json();
                         if (!Array.isArray(eligible)) eligible = [];
                     } catch (e) { eligible = [] }
-                    // Merge: all eligible tenants + all existing reminders (incl. deposit-only)
-                    const reminderMap = new Map();
-                    data.forEach(r => { if (!reminderMap.has(r.tenant_id)) reminderMap.set(r.tenant_id, r); });
+                    // Merge per TYPE: a tenant can have an independent RENT and
+                    // DEPOSIT reminder; each gets its own card/row.
+                    const typeOf = r => (r.rem_type || ((r.note || '').includes('eposit') ? 'deposit' : 'rent'));
+                    const byKey = new Map();
+                    data.forEach(r => {
+                        const t = typeOf(r);
+                        const k = r.tenant_id + '-' + t;
+                        const cur = byKey.get(k);
+                        if (!cur || (r.status === 'ACTIVE' && cur.status !== 'ACTIVE') || (r.status === cur.status && r.id > cur.id)) {
+                            byKey.set(k, { ...r, remType: t });
+                        }
+                    });
                     const seen = new Set();
                     const merged = [];
-                    // Eligible tenants first (with NOT_SET fill-in)
+                    // Eligible tenants first: RENT card from outstanding, DEPOSIT card if one exists
                     eligible.forEach(e => {
-                        seen.add(e.id);
-                        const existing = reminderMap.get(e.id);
-                        if (existing) {
-                            merged.push({ ...existing, outstanding: e.new_baki });
-                        } else {
+                        seen.add(e.id + '-rent');
+                        seen.add(e.id + '-deposit');
+                        const rentRow = byKey.get(e.id + '-rent');
+                        if (rentRow) {
+                            if (Number(e.new_baki) > 0) merged.push({ ...rentRow, outstanding: e.new_baki });
+                            else if (rentRow.id !== null) merged.push({ ...rentRow, outstanding: rentRow.amount_due });
+                        } else if (Number(e.new_baki) > 0) {
                             merged.push({
                                 id: null, tenant_id: e.id, tenant_name: e.tenant_name,
                                 display_address: e.display_address, reminder_date: null,
@@ -3779,14 +3790,16 @@ totalTenantPages() {
                                 remType: 'rent'
                             });
                         }
+                        const depRow = byKey.get(e.id + '-deposit');
+                        if (depRow && depRow.id !== null) merged.push({ ...depRow, outstanding: depRow.amount_due });
                     });
-                    // Orphaned reminders (tenant has no outstanding ledger but HAS a set reminder)
-                    data.forEach(r => {
-                        if (!seen.has(r.tenant_id)) {
-                            merged.push({ ...r, outstanding: r.amount_due, remType: 'deposit' });
-                            seen.add(r.tenant_id);
+                    // Orphaned reminders (tenant not in eligible list) — both types
+                    for (const [k, r] of byKey.entries()) {
+                        if (!seen.has(k) && r.id !== null) {
+                            merged.push({ ...r, outstanding: r.amount_due });
+                            seen.add(k);
                         }
-                    });
+                    }
                     // Sort: ACTIVE first, then NOT_SET, then rest by date
                     const order = { ACTIVE: 0, NOT_SET: 1, DONE: 2, SUPERSEDED: 3 };
                     merged.sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9));
