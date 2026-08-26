@@ -178,7 +178,14 @@ def render_due(cur, typ, reminder):
     }
 
 
-def build_items(month=None):
+def build_items(month=None, notify_only=False):
+    """Build the send queue.
+
+    notify_only=True (instant runs triggered by a payment/due-date save)
+    dispatches ONLY pre-queued NOTIFY confirmations — campaign items
+    (D1/DUE/HISAB) belong exclusively to scheduled / manual full runs,
+    otherwise every save would re-fire every eligible reminder.
+    """
     items = []
     seen = set()
     conn = get_db_connection(as_dict=True)
@@ -194,6 +201,8 @@ def build_items(month=None):
         it["label"] = "NOTIFY"
         it["stamp_col"] = _STAMP_COL["NOTIFY"]
         items.append(it)
+    if notify_only:
+        return items
     for typ, r in _due_reminders(month):
         key = (r['id'], typ)
         if key in seen:
@@ -269,6 +278,8 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
         pw.stop()
         sys.exit(2)
     print("✅ WhatsApp Web authenticated.")
+    global _SESSION_STARTED
+    _SESSION_STARTED = time.time()
 
     sent = failed = skipped = 0
     _attempted = set()
@@ -332,7 +343,12 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
             # Comparison is alphanumeric-normalized so WhatsApp formatting
             # (bold/italic asterisks, emoji, punctuation) cannot break it.
             target = _re.sub(r'[^a-z0-9]', '', it["message"].lower())[-60:]
-            try:
+            # Freshly (re)linked sessions render slowly; give the first
+            # sends / first 5 minutes a longer proof window.
+            _warm = i == 0 or (_SESSION_STARTED and time.time() - _SESSION_STARTED < 300)
+            _verify_ms = 150000 if _warm else 90000
+
+            def _proof_wait(ms):
                 page.wait_for_function(
                     """(snip) => {
                         const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -346,9 +362,30 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
                         return /status-check|status-dblcheck|msg-check|msg-dblcheck/i.test(html); // server acked
                     }""",
                     arg=target,
-                    timeout=90000,
+                    timeout=ms,
                 )
-                delivered = True
+
+            try:
+                try:
+                    _proof_wait(_verify_ms)
+                    delivered = True
+                except Exception:
+                    probe = 'bubble-not-found'
+                    # Degraded/slow sessions sometimes never render the sent
+                    # bubble even though WhatsApp accepted the message. Reopen
+                    # the chat once — history re-renders from the server — and
+                    # rescan before declaring failure.
+                    try:
+                        page.reload(wait_until="domcontentloaded")
+                        page.wait_for_selector(SELECTOR_INPUT, timeout=20000)
+                        time.sleep(2)
+                        _proof_wait(30000)
+                        delivered = True
+                        probe = None
+                    except Exception:
+                        pass
+                if not delivered:
+                    raise AssertionError('verify-failed')
             except Exception:
                 # Diagnose WHY for the failure record
                 try:
@@ -401,12 +438,17 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
                                   error=reason, screenshot_b64=screenshot_b64)
                 if it.get("log_id"):
                     _mark_log_failed(it["log_id"], reason)
-                if _DIAG == 'stuck-pending-clock' and it["send_type"] in ("D1", "DUE", "HISAB"):
-                    # Message is queued in WhatsApp's local outbox and typically
-                    # uploads once the socket recovers — stamp so a later run
-                    # does not send a duplicate.
+                if _DIAG in ('stuck-pending-clock', 'bubble-not-found',
+                             'acked-late', 'no-status-icons-detected') \
+                        and it["send_type"] in ("D1", "DUE", "HISAB"):
+                    # One attempt per stage, ever. All four diagnostics mean
+                    # the click happened and WhatsApp accepted/queued the
+                    # message client-side (delivery usually follows). Leaving
+                    # these unstamped made every later run re-send them
+                    # (duplicate-storm failure mode); failures stay visible in
+                    # the send log instead.
                     stamp_reminder_sent(it["reminder_id"], it.get("stamp_col", "d1_sent_at"))
-                    print(f"   ℹ️  stamped {it['stamp_col']} despite pending (outbox upload expected)")
+                    print(f"   ℹ️  stamped {it['stamp_col']} despite unconfirmed delivery (no cross-run retry)")
                 failed += 1
                 print(f"   ❌ Delivery unconfirmed for tenant {it['tenant_id']}")
         except Exception as e:
@@ -461,6 +503,7 @@ _STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".sender_
 _TEE = None
 _LAST_SUMMARY = None
 _DIAG = None
+_SESSION_STARTED = None
 
 
 class _StateTee:
@@ -544,7 +587,14 @@ def _state_finish(status, summary=None, run_id=None):
         pass
 
 
+_PAUSE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".sender_paused")
+
+
 def main():
+    if os.path.exists(_PAUSE_FILE):
+        import builtins
+        builtins.print("⏸  Sender is PAUSED (.sender_paused present). Remove the file to resume.")
+        return
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
@@ -592,16 +642,31 @@ def main():
     import fcntl
     lock_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".wa_sender.lock")
     with open(lock_path, "w") as lock_f:
-        try:
-            fcntl.flock(lock_f, fcntl.LOCK_EX)
-        except OSError:
-            pass
+        if args.kind == "instant":
+            # Instant triggers fire on EVERY payment/due-date save. If a
+            # sender is already running, DO NOT queue up another browser
+            # process — a backlog of lock-waiters re-sends everything
+            # unstamped the moment the lock frees (the duplicate-storm
+            # failure mode). The running drain pass picks up newly queued
+            # NOTIFYs itself.
+            try:
+                fcntl.flock(lock_f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                print("⏭  Sender already running — new NOTIFYs will be picked up by that run.")
+                _state_finish("skipped-busy", {"sent": 0, "failed": 0, "skipped": 0}, run_id=_rid)
+                return
+        else:
+            try:
+                fcntl.flock(lock_f, fcntl.LOCK_EX)
+            except OSError:
+                pass
 
         try:
             # Drain loop: messages can be queued while this run is still in
             # progress (queue was built before the browser finished booting).
-            for _pass in range(3):
-                items = build_items(args.month)
+            max_passes = 1 if args.kind == "instant" else 3
+            for _pass in range(max_passes):
+                items = build_items(args.month, notify_only=(args.kind == "instant"))
                 print(f"🔎 Due-date reminder queue: {len(items)} message(s).")
                 if not items:
                     print("Nothing to send.")

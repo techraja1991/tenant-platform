@@ -2150,35 +2150,57 @@ def set_reminder(data: ReminderSet):
         else:
             amount_due = data.amount_due
 
-        # supersede previous ACTIVE reminders of the SAME TYPE only
-        # (a deposit due-date must not kill an ACTIVE rent reminder and
-        # vice-versa — both can legitimately coexist for one month)
+        # If an ACTIVE reminder of the SAME TYPE already exists for the same
+        # date, treat this save as an AMOUNT/NOTE correction: update that row
+        # in place and keep its lifecycle stamps (notify/d1/due). Re-creating
+        # the row reset its stamps and made it instantly D1/DUE-eligible again
+        # — the root cause of duplicate reminder storms.
         cur.execute("""
-            UPDATE rental_core.tenant_reminders
-               SET status = 'SUPERSEDED', updated_at = now()
+            SELECT id FROM rental_core.tenant_reminders
              WHERE tenant_id = %s AND billing_month = %s AND status = 'ACTIVE'
-               AND COALESCE(rem_type, 'rent') = %s
-        """, (data.tenant_id, data.billing_month, data.rem_type or 'rent'))
+               AND COALESCE(rem_type, 'rent') = %s AND reminder_date = %s
+             ORDER BY id LIMIT 1
+        """, (data.tenant_id, data.billing_month, data.rem_type or 'rent', reminder_date))
+        existing = cur.fetchone()
 
-        # cancel now-orphaned QUEUED notifications of superseded reminders so
-        # no phantom QUEUED entries linger in the send log
-        cur.execute("""
-            UPDATE rental_core.reminder_send_log l
-               SET status = 'CANCELLED', error = 'superseded by newer reminder of same type'
-              FROM rental_core.tenant_reminders r
-             WHERE l.reminder_id = r.id AND l.status = 'QUEUED'
-               AND r.status = 'SUPERSEDED' AND r.tenant_id = %s
-               AND COALESCE(r.rem_type, 'rent') = %s
-        """, (data.tenant_id, data.rem_type or 'rent'))
+        if existing:
+            cur.execute("""
+                UPDATE rental_core.tenant_reminders
+                   SET amount_due = %s, note = %s, updated_at = now()
+                 WHERE id = %s
+                RETURNING *
+            """, (amount_due, data.note or "", existing['id']))
+            reminder = cur.fetchone()
+        else:
+            # supersede previous ACTIVE reminders of the SAME TYPE only
+            # (a deposit due-date must not kill an ACTIVE rent reminder and
+            # vice-versa — both can legitimately coexist for one month)
+            cur.execute("""
+                UPDATE rental_core.tenant_reminders
+                   SET status = 'SUPERSEDED', updated_at = now()
+                 WHERE tenant_id = %s AND billing_month = %s AND status = 'ACTIVE'
+                   AND COALESCE(rem_type, 'rent') = %s
+            """, (data.tenant_id, data.billing_month, data.rem_type or 'rent'))
 
-        cur.execute("""
-            INSERT INTO rental_core.tenant_reminders
-            (tenant_id, billing_month, reminder_date, amount_due, note, rem_type)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            RETURNING *
-        """, (data.tenant_id, data.billing_month, reminder_date, amount_due,
-              data.note or "", data.rem_type or 'rent'))
-        reminder = cur.fetchone()
+            # cancel now-orphaned QUEUED notifications of superseded reminders so
+            # no phantom QUEUED entries linger in the send log
+            cur.execute("""
+                UPDATE rental_core.reminder_send_log l
+                   SET status = 'CANCELLED', error = 'superseded by newer reminder of same type'
+                  FROM rental_core.tenant_reminders r
+                 WHERE l.reminder_id = r.id AND l.status = 'QUEUED'
+                   AND r.status = 'SUPERSEDED' AND r.tenant_id = %s
+                   AND COALESCE(r.rem_type, 'rent') = %s
+            """, (data.tenant_id, data.rem_type or 'rent'))
+
+            cur.execute("""
+                INSERT INTO rental_core.tenant_reminders
+                (tenant_id, billing_month, reminder_date, amount_due, note, rem_type)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING *
+            """, (data.tenant_id, data.billing_month, reminder_date, amount_due,
+                  data.note or "", data.rem_type or 'rent'))
+            reminder = cur.fetchone()
 
         # queue NOTIFY message (type-aware + payment ack)
         payload = rm.reminder_payload(cur, reminder,
