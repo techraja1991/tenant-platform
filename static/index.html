@@ -2045,7 +2045,7 @@
                                 <td class="p-3 text-slate-400" x-text="row.phone_number"></td>
                                 <td class="p-3 text-slate-400" x-text="row.billing_month"></td>
                                 <td class="p-3 text-slate-400" x-text="row.template_name || '—'"></td>
-                                <td class="p-3 text-slate-400" x-text="row.sent_at ? String(row.sent_at).slice(0,19) : '—'"></td>
+                                <td class="p-3 text-slate-400" x-text="row.sent_at ? fmtDateTime(row.sent_at) : '—'"></td>
                                 <td class="p-3 text-rose-400 text-xs" x-text="row.error || '—'"></td>
                                 <td class="p-3">
                                     <a href="data:image/png;base64,row.screenshot" target="_blank" class="text-slate-400 text-xs underline cursor-pointer" title="View screenshot">
@@ -2166,9 +2166,12 @@
                                 <td class="p-3"><span class="px-2 py-0.5 rounded text-xs font-bold" :class="logRowType(row)==='deposit' ? 'bg-purple-500/20 text-purple-300' : 'bg-indigo-500/20 text-indigo-300'" x-text="logRowType(row)==='deposit' ? 'DEPOSIT' : 'RENT'"></span></td>
                                 <td class="p-3"><div class="text-xs font-medium" x-text="row.tenant_name || ('#' + row.tenant_id)"></div><div class="text-[10px] text-slate-500" x-text="row.display_address || ''"></div></td>
                                 <td class="p-3 text-slate-400 text-xs" x-text="row.phone_number"></td>
-                                <td class="p-3 text-slate-400 text-xs" x-show="reminderLogScope==='all'" x-text="row.sent_at ? String(row.sent_at).slice(0,19).replace('T',' ') : (row.created_at ? String(row.created_at).slice(0,19).replace('T',' ')+'*' : '—')"></td>
+                                <td class="p-3 text-slate-400 text-xs" x-show="reminderLogScope==='all'" x-text="row.sent_at ? fmtDateTime(row.sent_at) : (row.created_at ? fmtDateTime(row.created_at) + ' (queued)' : '—')"></td>
                                 <td class="p-3 text-slate-400 text-xs truncate max-w-[110px]" x-show="reminderLogScope==='batch'" x-text="row.batch_id || '—'"></td>
-                                <td class="p-3 text-rose-400 text-xs max-w-[140px] truncate" :title="row.error || ''" x-text="row.error || '—'"></td>
+                                <td class="p-3 text-xs max-w-[140px]">
+                                    <button x-show="row.error" @click="viewLogError(row)" class="text-rose-400 hover:text-rose-300 text-left w-full truncate" x-text="row.error"></button>
+                                    <span x-show="!row.error" class="text-slate-600">—</span>
+                                </td>
                                 <td class="p-3">
                                     <button @click="viewLogMessage(row)" class="px-2 py-1 rounded bg-slate-700/70 text-slate-200 hover:bg-slate-600 text-xs font-medium"><i class="fa-solid fa-comment-dots mr-1"></i>Msg</button>
                                 </td>
@@ -2577,7 +2580,10 @@
                 screenshotData: null,
                 screenshotMeta: null,
                 showMessageModal: false,
-                senderRun: { data: null, expanded: false, dismissed: false, _lastRunId: null },
+                messageModalData: null,
+                showErrModal: false,
+                errModalData: null,
+                senderRun: { data: { running:false, status:'idle', lines:[], kind:null, pid:null, summary:null }, expanded: false, dismissed: false, _lastRunId: null },
                 get senderRunning() { return !!(this.senderRun.data && this.senderRun.data.running); },
                 get senderKindLabel() {
                     const k = this.senderRun.data?.kind;
@@ -4000,6 +4006,21 @@ totalTenantPages() {
                     const res2 = await fetch(url);
                     this.reminderLog = await res2.json().catch(() => []);
                 },
+                viewLogError(row) {
+                    if (!row || !row.error) return;
+                    this.errModalData = {
+                        error: row.error,
+                        status: row.status,
+                        type: row.send_type,
+                        rowType: this.logRowType(row),
+                        tenant: row.tenant_name || ('#' + row.tenant_id),
+                        phone: row.phone_number,
+                        batch: row.batch_id,
+                        sentAt: row.sent_at ? this.fmtDateTime(row.sent_at) : '',
+                        message: row.message || ''
+                    };
+                    this.showErrModal = true;
+                },
                 viewLogMessage(row) {
                     if (!row) return;
                     this.messageModalData = { text: row.message || '', type: this.logRowType(row), status: row.status, tenant: row.tenant_name || ('#' + row.tenant_id), phone: row.phone_number };
@@ -4012,7 +4033,7 @@ totalTenantPages() {
                 viewScreenshot(row) {
                     if (!row || !row.screenshot) return;
                     this.screenshotData = 'data:image/png;base64,' + row.screenshot;
-                    this.screenshotMeta = { tenant: row.tenant_id, phone: row.phone_number, type: row.send_type, status: row.status, sentAt: row.sent_at ? String(row.sent_at).slice(0,19) : '' };
+                    this.screenshotMeta = { tenant: row.tenant_id, phone: row.phone_number, type: row.send_type, status: row.status, sentAt: row.sent_at ? fmtDateTime(row.sent_at) : '' };
                     this.showScreenshotModal = true;
                 },
                 formatReminderDate(d, status) {
@@ -4023,9 +4044,21 @@ totalTenantPages() {
                     } catch (e) { return s; }
                 },
                 fmtTime(ts) {
+                    // UTC ISO (…Z) -> IST display; legacy raw strings pass through
                     if (!ts) return '—';
-                    const s = String(ts);
-                    return s.slice(8, 10) + '/' + s.slice(5, 7) + ' ' + s.slice(11, 16);
+                    try {
+                        const d = new Date(String(ts).endsWith('Z') ? ts : String(ts).replace(' ', 'T') + 'Z');
+                        if (isNaN(d)) return String(ts).slice(0, 16);
+                        return d.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
+                    } catch (e) { return String(ts).slice(0, 16); }
+                },
+                fmtDateTime(ts) {
+                    if (!ts) return '—';
+                    try {
+                        const d = new Date(String(ts).endsWith('Z') ? ts : String(ts).replace(' ', 'T') + 'Z');
+                        if (isNaN(d)) return String(ts).slice(0, 19);
+                        return d.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+                    } catch (e) { return String(ts).slice(0, 19); }
                 },
                 fmtNum(v) {
                     const n = Number(v) || 0;
@@ -4035,41 +4068,62 @@ totalTenantPages() {
         }
     </script>
 
+    <!-- LOG ERROR VIEWER MODAL -->
+    <div x-show="showErrModal" x-cloak class="fixed inset-0 bg-black/80 flex items-center justify-center z-[60] p-4">
+        <div class="bg-slate-900 rounded-xl border border-rose-900/50 max-w-md w-full space-y-3 max-h-[94vh] overflow-y-auto p-5">
+            <div class="flex items-center justify-between">
+                <h2 class="text-lg font-bold text-rose-300"><i class="fa-solid fa-triangle-exclamation mr-1"></i>Failure Details</h2>
+                <button @click="showErrModal = false" class="text-slate-400 text-xl"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="grid grid-cols-2 gap-2 text-xs text-slate-400" x-show="errModalData">
+                <div><span class="text-slate-500">Tenant:</span> <span x-text="errModalData?.tenant"></span></div>
+                <div><span class="text-slate-500">Phone:</span> <span x-text="errModalData?.phone"></span></div>
+                <div><span class="text-slate-500">Type:</span> <span class="font-bold" :class="errModalData?.rowType==='deposit' ? 'text-purple-300' : 'text-indigo-300'" x-text="(errModalData?.rowType || '').toUpperCase()"></span></div>
+                <div><span class="text-slate-500">Status:</span> <span x-text="errModalData?.status"></span></div>
+                <div class="col-span-2"><span class="text-slate-500">Batch:</span> <span class="font-mono text-[10px]" x-text="errModalData?.batch"></span></div>
+                <div class="col-span-2" x-show="errModalData?.sentAt"><span class="text-slate-500">Sent At:</span> <span x-text="errModalData?.sentAt"></span></div>
+            </div>
+            <div class="bg-rose-950/30 border border-rose-900/50 rounded-lg p-3 text-xs text-rose-200 leading-relaxed whitespace-pre-line" x-text="errModalData?.error || ''"></div>
+            <div x-show="errModalData?.message" class="bg-slate-800/60 border border-slate-700 rounded-lg p-3 text-[11px] text-slate-300 whitespace-pre-line max-h-40 overflow-y-auto" x-text="errModalData?.message"></div>
+            <button @click="showErrModal = false" class="w-full px-4 py-3 bg-slate-700 rounded-lg hover:bg-slate-600 font-medium text-sm">Close</button>
+        </div>
+    </div>
+
     <!-- SENDER LIVE-RUN MONITOR (floating) -->
     <div x-data x-show="$data.senderRun.data && ($data.senderRunning || !$data.senderRun.dismissed) && new Date($data.senderRun.data.finished_at || 0) > Date.now() - 120000" x-cloak
          class="fixed bottom-4 right-4 z-[70] w-[92vw] max-w-sm">
         <div class="bg-slate-900 border rounded-xl shadow-2xl overflow-hidden"
              :class="$data.senderRunning ? 'border-indigo-500' : 'border-slate-700'">
             <button @click="$data.senderRun.expanded = !$data.senderRun.expanded" class="w-full flex items-center gap-2 px-3 py-2.5 text-left">
-                <i class="text-lg" :class="$data.senderRunning ? 'fa-solid fa-satellite-dish animate-pulse text-emerald-400' : ($data.senderRun.data.status === 'finished' ? 'fa-solid fa-circle-check text-emerald-500' : 'fa-solid fa-triangle-exclamation text-rose-400')"></i>
+                <i class="text-lg" :class="$data.senderRunning ? 'fa-solid fa-satellite-dish animate-pulse text-emerald-400' : ($data.senderRun.data?.status === 'finished' ? 'fa-solid fa-circle-check text-emerald-500' : 'fa-solid fa-triangle-exclamation text-rose-400')"></i>
                 <span class="flex-1 min-w-0">
                     <span class="block text-xs font-bold"
                           :class="$data.senderRunning ? 'text-emerald-300' : 'text-slate-200'">
-                        <span x-text="$data.senderRunning ? 'Sending reminders…' : ($data.senderRun.data.status === 'finished' ? 'Send finished' : $data.senderRun.data.status)"></span>
+                        <span x-text="$data.senderRunning ? 'Sending reminders…' : ($data.senderRun.data?.status === 'finished' ? 'Send finished' : ($data.senderRun.data?.status || 'idle'))"></span>
                         <span class="ml-1 px-1.5 py-0.5 rounded text-[9px] font-bold align-middle"
                               :class="$data.senderRun.data.kind === 'scheduled' ? 'bg-amber-500/20 text-amber-300' : 'bg-indigo-500/20 text-indigo-300'"
                               x-text="$data.senderKindLabel"></span>
                     </span>
-                    <span class="block text-[10px] text-slate-500 truncate" x-text="($data.senderRun.data.lines || []).slice(-1)[0]?.line || ''"></span>
+                    <span class="block text-[10px] text-slate-500 truncate" x-text="($data.senderRun.data?.lines || []).slice(-1)[0]?.line || ''"></span>
                 </span>
                 <span class="text-[10px] text-slate-400 font-mono" x-text="$data.senderElapsed"></span>
                 <i class="fa-solid text-slate-500 text-xs" :class="$data.senderRun.expanded ? 'fa-chevron-down' : 'fa-chevron-up'"></i>
             </button>
             <div x-show="$data.senderRun.expanded" class="border-t border-slate-800">
                 <div class="max-h-56 overflow-y-auto bg-black/40 p-2 font-mono text-[10px] leading-relaxed space-y-0.5">
-                    <template x-for="(ln, i) in ($data.senderRun.data.lines || [])" :key="i">
+                    <template x-for="(ln, i) in ($data.senderRun.data?.lines || [])" :key="i">
                         <div class="flex gap-2">
                             <span class="text-slate-600 shrink-0" x-text="ln.ts"></span>
                             <span class="text-slate-300 break-all" x-text="ln.line"></span>
                         </div>
                     </template>
-                    <div x-show="!($data.senderRun.data.lines || []).length" class="text-slate-600 italic">waiting for output…</div>
+                    <div x-show="!($data.senderRun.data?.lines || []).length" class="text-slate-600 italic">waiting for output…</div>
                 </div>
                 <div class="px-3 py-2 flex items-center justify-between bg-slate-900 border-t border-slate-800">
-                    <span class="text-[10px] text-slate-500" x-text="'PID ' + ($data.senderRun.data.pid || '—')"></span>
+                    <span class="text-[10px] text-slate-500" x-text="'PID ' + ($data.senderRun.data?.pid || '—')"></span>
                     <div class="flex items-center gap-2">
-                        <span x-show="$data.senderRun.data.summary && !$data.senderRunning" class="text-[10px] font-bold text-emerald-400"
-                              x-text="'✓ ' + ($data.senderRun.data.summary.sent||0) + ' sent · ✗ ' + ($data.senderRun.data.summary.failed||0) + ' failed'"></span>
+                        <span x-show="$data.senderRun.data?.summary && !$data.senderRunning" class="text-[10px] font-bold text-emerald-400"
+                              x-text="'✓ ' + ($data.senderRun.data?.summary?.sent||0) + ' sent · ✗ ' + ($data.senderRun.data?.summary?.failed||0) + ' failed'"></span>
                         <button @click="$data.dismissSenderRun()" class="text-[10px] text-slate-400 hover:text-white">Dismiss</button>
                     </div>
                 </div>

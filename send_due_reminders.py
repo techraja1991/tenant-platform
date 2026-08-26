@@ -53,7 +53,7 @@ def log_reminder_send(batch_id, reminder, send_type, message, status, error=None
     """, (
         batch_id, reminder['id'], reminder['tenant_id'], reminder['phone_number'],
         send_type, message, status, error,
-        datetime.now() if status == "SENT" else None,
+        datetime.utcnow() if status == "SENT" else None,
         screenshot_b64,
     ))
     conn.commit()

@@ -2084,7 +2084,7 @@ def list_reminders(month: str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$")):
     month, regardless of billing_month. Shows both rent and deposit reminders."""
     year, mon = int(month[:4]), int(month[5:7])
     rows = rm.month_reminders(year, mon)
-    return rows
+    return _utc_tagged(rows)
 
 
 @app.get("/api/reminders/tenants")
@@ -2334,6 +2334,19 @@ def reminders_run_status():
     }
 
 
+def _utc_tagged(rows):
+    """Tag naive UTC datetimes with 'Z' so browsers convert to local/IST."""
+    import datetime as _dt
+    out = []
+    for r in rows:
+        d = dict(r)
+        for k, v in d.items():
+            if isinstance(v, _dt.datetime):
+                d[k] = v.isoformat() + 'Z'
+        out.append(d)
+    return out
+
+
 @app.get("/api/reminders/send-log")
 def get_reminder_send_log(limit: int = Query(200, ge=1, le=2000), batch_id: str = None):
     conn = get_db()
@@ -2357,7 +2370,7 @@ def get_reminder_send_log(limit: int = Query(200, ge=1, le=2000), batch_id: str 
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return rows
+    return _utc_tagged(rows)
 
 
 @app.get("/api/reminders/last-batch")
