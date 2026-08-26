@@ -229,7 +229,7 @@ def build_items(month=None):
 
 def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
                test_number=None, fast=False):
-    global _TYPE_MIN, _TYPE_MAX
+    global _TYPE_MIN, _TYPE_MAX, _DIAG
     if fast:
         _TYPE_MIN, _TYPE_MAX = 8, 20
     else:
@@ -271,6 +271,7 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
     print("✅ WhatsApp Web authenticated.")
 
     sent = failed = skipped = 0
+    _attempted = set()
     for i, it in enumerate(items):
         if limit and i >= limit:
             print(f"🛑 Reached limit {limit}, stopping.")
@@ -278,6 +279,12 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
         if i > 0:
             random_pause(min_delay, max_delay)
         num = wm.normalize_phone(test_number) if test_number else wm.normalize_phone(it["phone_number"])
+        _akey = (it["reminder_id"], it["send_type"])
+        if _akey in _attempted:
+            print(f"⏭  SKIP {it['label']} tenant {it['tenant_id']}: already attempted this run")
+            skipped += 1
+            continue
+        _attempted.add(_akey)
         # Pre-send guard: another run may have stamped this already, or the
         # reminder may have been superseded/deleted while we were launching.
         if it["send_type"] in ("D1", "DUE", "HISAB"):
@@ -317,22 +324,48 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
             import time as _t
             import re as _re
             _t.sleep(random.uniform(0.5, 1.0))
-            # Compare alphanumeric-only lowercase tails: immune to WhatsApp
-            # bold/italic markup, emoji, punctuation and whitespace variants.
+            # Two-stage delivery proof:
+            #   1) our text sits in an OUTGOING bubble, AND
+            #   2) that bubble shows a server-ack tick (single/double),
+            #      NOT the clock. A rendered bubble with a clock is only
+            #      queued locally — the recipient never gets it.
+            # Comparison is alphanumeric-normalized so WhatsApp formatting
+            # (bold/italic asterisks, emoji, punctuation) cannot break it.
             target = _re.sub(r'[^a-z0-9]', '', it["message"].lower())[-60:]
             try:
                 page.wait_for_function(
                     """(snip) => {
+                        const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
                         const main = document.querySelector('#main');
                         if (!main) return false;
-                        const norm = (main.innerText || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-                        return norm.includes(snip);
+                        const outs = [...document.querySelectorAll('.message-out')];
+                        const mine = outs.filter(b => norm(b.innerText).includes(snip)).pop();
+                        if (!mine) return false;
+                        const html = mine.innerHTML || '';
+                        if (/status-pending|data-icon=\"clock\"/i.test(html)) return false;   // still queued locally
+                        return /status-check|status-dblcheck|msg-check|msg-dblcheck/i.test(html); // server acked
                     }""",
                     arg=target,
-                    timeout=25000,
+                    timeout=90000,
                 )
                 delivered = True
             except Exception:
+                # Diagnose WHY for the failure record
+                try:
+                    probe = page.evaluate(
+                        """(snip) => {
+                            const norm=(s)=>(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+                            const outs=[...document.querySelectorAll('.message-out')];
+                            const mine=outs.filter(b=>norm(b.innerText).includes(snip)).pop();
+                            if(!mine) return 'bubble-not-found';
+                            const h=mine.innerHTML||'';
+                            if(/status-pending|data-icon=\"clock\"/i.test(h)) return 'stuck-pending-clock';
+                            if(/status-check|status-dblcheck/i.test(h)) return 'acked-late';
+                            return 'no-status-icons-detected';
+                        }""", target)
+                except Exception:
+                    probe = 'probe-failed'
+                _DIAG = probe
                 delivered = False
 
             # Screenshot of the chat right after send attempt (proof)
@@ -358,10 +391,22 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
                 sent += 1
                 print(f"   ✅ Sent {it['label']} to tenant {it['tenant_id']}")
             else:
+                reason = {
+                    'stuck-pending-clock': 'WhatsApp shows PENDING (clock) - message never reached server',
+                    'bubble-not-found': 'Sent bubble not found in chat',
+                    'acked-late': 'Ack arrived late',
+                    'no-status-icons-detected': 'No delivery-status icons found on bubble',
+                }.get(_DIAG, 'Delivery not confirmed in chat')
                 log_reminder_send(_BATCH, reminder, it["send_type"], it["message"], "FAILED",
-                                  error="Delivery not confirmed in chat", screenshot_b64=screenshot_b64)
+                                  error=reason, screenshot_b64=screenshot_b64)
                 if it.get("log_id"):
-                    _mark_log_failed(it["log_id"], "Delivery not confirmed in chat")
+                    _mark_log_failed(it["log_id"], reason)
+                if _DIAG == 'stuck-pending-clock' and it["send_type"] in ("D1", "DUE", "HISAB"):
+                    # Message is queued in WhatsApp's local outbox and typically
+                    # uploads once the socket recovers — stamp so a later run
+                    # does not send a duplicate.
+                    stamp_reminder_sent(it["reminder_id"], it.get("stamp_col", "d1_sent_at"))
+                    print(f"   ℹ️  stamped {it['stamp_col']} despite pending (outbox upload expected)")
                 failed += 1
                 print(f"   ❌ Delivery unconfirmed for tenant {it['tenant_id']}")
         except Exception as e:
@@ -415,6 +460,7 @@ def _mark_log_sent(log_id):
 _STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".sender_state.json")
 _TEE = None
 _LAST_SUMMARY = None
+_DIAG = None
 
 
 class _StateTee:
