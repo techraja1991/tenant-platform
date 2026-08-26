@@ -147,8 +147,28 @@ def render_notify(cur, log_row):
     }
 
 
+def _rem_type_of(reminder):
+    t = (reminder.get('rem_type') if isinstance(reminder, dict) else None) or ''
+    if t in ('rent', 'deposit'):
+        return t
+    return 'deposit' if 'eposit' in str(reminder.get('note') or '') else 'rent'
+
+
+_STAMP_COL = {"NOTIFY": "notify_sent_at", "D1": "d1_sent_at",
+              "DUE": "due_sent_at", "HISAB": "due_sent_at"}
+
+
+def _stamp_taken(conn_unused, reminder_id, col):
+    conn = get_db_connection(as_dict=True)
+    cur = conn.cursor()
+    cur.execute(f"SELECT {col} FROM rental_core.tenant_reminders WHERE id=%s", (reminder_id,))
+    row = cur.fetchone()
+    cur.close(); conn.close()
+    return bool(row and row[col] is not None)
+
+
 def render_due(cur, typ, reminder):
-    payload = rm.reminder_payload(cur, reminder)
+    payload = rm.reminder_payload(cur, reminder, rem_type=_rem_type_of(reminder))
     return {
         "reminder_id": reminder['id'],
         "tenant_id": reminder['tenant_id'],
@@ -160,15 +180,25 @@ def render_due(cur, typ, reminder):
 
 def build_items(month=None):
     items = []
+    seen = set()
     conn = get_db_connection(as_dict=True)
     cur = conn.cursor()
     for n in _pending_notifies(month):
+        key = (n["reminder_id"], "NOTIFY")
+        if key in seen:
+            continue
+        seen.add(key)
         it = render_notify(cur, n)
         it["send_type"] = "NOTIFY"
         it["log_id"] = n["log_id"]
         it["label"] = "NOTIFY"
+        it["stamp_col"] = _STAMP_COL["NOTIFY"]
         items.append(it)
     for typ, r in _due_reminders(month):
+        key = (r['id'], typ)
+        if key in seen:
+            continue
+        seen.add(key)
         if not _outstanding_gt_zero(cur, r['tenant_id'], r['billing_month']):
             print(f"⏭  SKIP tenant {r['tenant_id']} for {r['billing_month']}: "
                   f"outstanding is 0 (already paid)")
@@ -176,16 +206,22 @@ def build_items(month=None):
         it = render_due(cur, typ, r)
         it["send_type"] = typ
         it["label"] = typ
+        it["stamp_col"] = _STAMP_COL[typ]
+        it["reminder_status"] = r.get('status', 'ACTIVE')
         items.append(it)
         if typ == "DUE":
-            # on the due date, also send the full template hisab message
-            hisab = rm.reminder_payload(cur, r)["hisab"]
-            if hisab:
-                h = dict(it)
-                h["send_type"] = "HISAB"
-                h["label"] = "HISAB"
-                h["message"] = hisab
-                items.append(h)
+            hkey = (r['id'], "HISAB")
+            if hkey not in seen:
+                seen.add(hkey)
+                # on the due date, also send the full template hisab message
+                hisab = rm.reminder_payload(cur, r, rem_type=_rem_type_of(r))["hisab"]
+                if hisab:
+                    h = dict(it)
+                    h["send_type"] = "HISAB"
+                    h["label"] = "HISAB"
+                    h["message"] = hisab
+                    h["stamp_col"] = _STAMP_COL["HISAB"]
+                    items.append(h)
     cur.close()
     conn.close()
     return items
@@ -242,6 +278,22 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
         if i > 0:
             random_pause(min_delay, max_delay)
         num = wm.normalize_phone(test_number) if test_number else wm.normalize_phone(it["phone_number"])
+        # Pre-send guard: another run may have stamped this already, or the
+        # reminder may have been superseded/deleted while we were launching.
+        if it["send_type"] in ("D1", "DUE", "HISAB"):
+            if _stamp_taken(None, it["reminder_id"], it.get("stamp_col", "d1_sent_at")):
+                print(f"⏭  SKIP {it['label']} tenant {it['tenant_id']}: already stamped")
+                skipped += 1
+                continue
+        if it.get("reminder_status") == "ACTIVE" or it["send_type"] in ("D1", "DUE", "HISAB"):
+            conn_chk = get_db_connection(as_dict=True); _c = conn_chk.cursor()
+            _c.execute("SELECT status FROM rental_core.tenant_reminders WHERE id=%s", (it["reminder_id"],))
+            _row = _c.fetchone()
+            _c.close(); conn_chk.close()
+            if not _row or _row["status"] != "ACTIVE":
+                print(f"⏭  SKIP {it['label']} tenant {it['tenant_id']}: reminder no longer ACTIVE")
+                skipped += 1
+                continue
         try:
             print(f"📨 [{i+1}/{len(items)}] {it['label']} to tenant {it['tenant_id']} {num}...")
             page.goto(f"https://web.whatsapp.com/send?phone={num}", wait_until="domcontentloaded")
@@ -302,7 +354,7 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
                                   screenshot_b64=screenshot_b64)
                 if it.get("log_id"):
                     _mark_log_sent(it["log_id"])
-                stamp_reminder_sent(it["reminder_id"], "notify_sent_at")
+                stamp_reminder_sent(it["reminder_id"], it.get("stamp_col", "notify_sent_at"))
                 sent += 1
                 print(f"   ✅ Sent {it['label']} to tenant {it['tenant_id']}")
             else:
@@ -328,6 +380,8 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
     print(f"\n📊 Summary: sent={sent} failed={failed} skipped={skipped}")
     print("SEND_REPORT " + json.dumps({"batch_id": _BATCH, "sent": sent,
                                        "failed": failed, "skipped": skipped}))
+    global _LAST_SUMMARY
+    _LAST_SUMMARY = {"sent": sent, "failed": failed, "skipped": skipped}
 
 
 def _mark_log_failed(log_id, error):
@@ -358,7 +412,94 @@ def _mark_log_sent(log_id):
     conn.close()
 
 
+_STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".sender_state.json")
+_TEE = None
+_LAST_SUMMARY = None
+
+
+class _StateTee:
+    """Tees sender lines into .sender_state.json so the GUI can show live
+    progress of whichever run is active (instant or scheduled)."""
+
+    def __init__(self, orig):
+        self._orig = orig
+        self.run_id = None
+
+    def write(self, s):
+        try:
+            self._orig.write(s)
+        except Exception:
+            pass
+        return len(s)
+
+    def flush(self):
+        try:
+            self._orig.flush()
+        except Exception:
+            pass
+
+    def log_line(self, line):
+        if not self.run_id:
+            return
+        try:
+            import json as _json
+            from datetime import datetime as _dt
+            try:
+                with open(_STATE_PATH) as f:
+                    st = _json.load(f)
+            except Exception:
+                return
+            if st.get("run_id") != self.run_id:
+                return  # a newer run owns the state file
+            st.setdefault("lines", []).append(
+                {"ts": _dt.now().strftime("%H:%M:%S"), "line": str(line)[:300]})
+            st["lines"] = st["lines"][-200:]
+            st["updated_at"] = _dt.now().isoformat()
+            tmp = _STATE_PATH + ".tmp"
+            with open(tmp, "w") as f:
+                _json.dump(st, f)
+            os.replace(tmp, _STATE_PATH)
+        except Exception:
+            pass
+
+
+def _state_write(st):
+    import json as _json
+    tmp = _STATE_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        _json.dump(st, f)
+    os.replace(tmp, _STATE_PATH)
+
+
+def _state_init(kind):
+    from datetime import datetime as _dt
+    st = {"run_id": uuid.uuid4().hex[:10], "kind": kind, "pid": os.getpid(),
+          "status": "running", "started_at": _dt.now().isoformat(),
+          "updated_at": _dt.now().isoformat(), "lines": [], "summary": None}
+    _state_write(st)
+    return st
+
+
+def _state_finish(status, summary=None, run_id=None):
+    from datetime import datetime as _dt
+    try:
+        import json as _json
+        with open(_STATE_PATH) as f:
+            st = _json.load(f)
+        if run_id and st.get("run_id") != run_id:
+            return
+        st["status"] = status
+        st["finished_at"] = _dt.now().isoformat()
+        st["updated_at"] = st["finished_at"]
+        if summary is not None:
+            st["summary"] = summary
+        _state_write(st)
+    except Exception:
+        pass
+
+
 def main():
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--month", default=None, help="Filter to one billing month YYYY-MM")
@@ -368,10 +509,34 @@ def main():
     ap.add_argument("--test-number", default=None)
     ap.add_argument("--fast", action="store_true")
     ap.add_argument("--headed", action="store_true")
+    ap.add_argument("--kind", default=None, choices=[None, "instant", "scheduled"],
+                    help="Launcher hint; auto-detected when omitted.")
     args = ap.parse_args()
+    if not args.kind:
+        # systemd services carry INVOCATION_ID; GUI/API spawns do not.
+        args.kind = "scheduled" if os.environ.get("INVOCATION_ID") else "instant"
 
     global _BATCH, _HEADED
     _HEADED = args.headed
+
+    # Live-run state for GUI monitoring
+    global _TEE
+    import sys as _sys
+    _TEE = _StateTee(_sys.__stdout__)
+    _sys.stdout = _TEE
+    import builtins as _builtins
+    _raw_print = _builtins.print
+
+    def print(*a, **k):  # noqa: A001 - mirror every sender line to GUI state
+        _raw_print(*a, **k)
+        try:
+            _TEE.log_line(" ".join(str(x) for x in a))
+        except Exception:
+            pass
+
+    _st = _state_init(args.kind)
+    _TEE.run_id = _st["run_id"]
+    _rid = _st["run_id"]
 
     # Single-flight lock: two rapid triggers (e.g. deposit save followed
     # instantly by rent save) each spawn a sender; both would open the same
@@ -394,6 +559,7 @@ def main():
                 print(f"🔎 Due-date reminder queue: {len(items)} message(s).")
                 if not items:
                     print("Nothing to send.")
+                    _state_finish("finished", {"sent": 0, "failed": 0, "skipped": 0}, run_id=_rid)
                     return
                 if args.test_number and not args.dry_run and not args.limit:
                     args.limit = 1
@@ -403,6 +569,7 @@ def main():
                 if args.dry_run or (args.limit and args.limit <= 1):
                     break
         finally:
+            _state_finish("finished", summary=_LAST_SUMMARY or {"sent": 0, "failed": 0, "skipped": 0}, run_id=_rid)
             fcntl.flock(lock_f, fcntl.LOCK_UN)
 
 

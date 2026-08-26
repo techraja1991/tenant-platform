@@ -2577,6 +2577,30 @@
                 screenshotData: null,
                 screenshotMeta: null,
                 showMessageModal: false,
+                senderRun: { data: null, expanded: false, dismissed: false, _lastRunId: null },
+                get senderRunning() { return !!(this.senderRun.data && this.senderRun.data.running); },
+                get senderKindLabel() {
+                    const k = this.senderRun.data?.kind;
+                    return k === 'scheduled' ? 'SCHEDULED 10:00' : (k === 'instant' ? 'INSTANT' : '');
+                },
+                get senderElapsed() {
+                    const d = this.senderRun.data; if (!d || !d.started_at) return '';
+                    const t = new Date(d.finished_at || d.updated_at || Date.now()) - new Date(d.started_at);
+                    const s = Math.max(0, Math.floor(t / 1000));
+                    return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+                },
+                async pollSenderRun() {
+                    try {
+                        const res = await fetch('/api/reminders/run-status');
+                        const d = await res.json();
+                        const prev = this.senderRun.data;
+                        this.senderRun.data = d;
+                        if (prev && prev.run_id !== d.run_id) this.senderRun.dismissed = false;
+                        // auto-show while running; keep visible ~2min after finish
+                        if (d.running) this.senderRun.dismissed = false;
+                    } catch (e) {}
+                },
+                dismissSenderRun() { this.senderRun.dismissed = true; },
                 messageModalData: null,
                 get reminderLogView() {
                     const rows = this.reminderLog || [];
@@ -2899,6 +2923,8 @@
                     this.$watch('ledgerSearch', () => { this.ledgerCurrentPage = 1; this.paymentCurrentPage = 1; });
                     this.$watch('ledgerPropertyFilter', () => { this.ledgerCurrentPage = 1; this.paymentCurrentPage = 1; });
                     this.$watch('ledgerSort', () => { this.ledgerCurrentPage = 1; });
+                    this.pollSenderRun();
+                    setInterval(() => this.pollSenderRun(), 3000);
                     window.addEventListener('scroll', () => this.onScroll(), { passive: true });
                     document.documentElement.addEventListener('scroll', () => this.onScroll(), { passive: true });
                     // Watch for customer search changes
@@ -4008,5 +4034,47 @@ totalTenantPages() {
             }
         }
     </script>
+
+    <!-- SENDER LIVE-RUN MONITOR (floating) -->
+    <div x-data x-show="$data.senderRun.data && ($data.senderRunning || !$data.senderRun.dismissed) && new Date($data.senderRun.data.finished_at || 0) > Date.now() - 120000" x-cloak
+         class="fixed bottom-4 right-4 z-[70] w-[92vw] max-w-sm">
+        <div class="bg-slate-900 border rounded-xl shadow-2xl overflow-hidden"
+             :class="$data.senderRunning ? 'border-indigo-500' : 'border-slate-700'">
+            <button @click="$data.senderRun.expanded = !$data.senderRun.expanded" class="w-full flex items-center gap-2 px-3 py-2.5 text-left">
+                <i class="text-lg" :class="$data.senderRunning ? 'fa-solid fa-satellite-dish animate-pulse text-emerald-400' : ($data.senderRun.data.status === 'finished' ? 'fa-solid fa-circle-check text-emerald-500' : 'fa-solid fa-triangle-exclamation text-rose-400')"></i>
+                <span class="flex-1 min-w-0">
+                    <span class="block text-xs font-bold"
+                          :class="$data.senderRunning ? 'text-emerald-300' : 'text-slate-200'">
+                        <span x-text="$data.senderRunning ? 'Sending reminders…' : ($data.senderRun.data.status === 'finished' ? 'Send finished' : $data.senderRun.data.status)"></span>
+                        <span class="ml-1 px-1.5 py-0.5 rounded text-[9px] font-bold align-middle"
+                              :class="$data.senderRun.data.kind === 'scheduled' ? 'bg-amber-500/20 text-amber-300' : 'bg-indigo-500/20 text-indigo-300'"
+                              x-text="$data.senderKindLabel"></span>
+                    </span>
+                    <span class="block text-[10px] text-slate-500 truncate" x-text="($data.senderRun.data.lines || []).slice(-1)[0]?.line || ''"></span>
+                </span>
+                <span class="text-[10px] text-slate-400 font-mono" x-text="$data.senderElapsed"></span>
+                <i class="fa-solid text-slate-500 text-xs" :class="$data.senderRun.expanded ? 'fa-chevron-down' : 'fa-chevron-up'"></i>
+            </button>
+            <div x-show="$data.senderRun.expanded" class="border-t border-slate-800">
+                <div class="max-h-56 overflow-y-auto bg-black/40 p-2 font-mono text-[10px] leading-relaxed space-y-0.5">
+                    <template x-for="(ln, i) in ($data.senderRun.data.lines || [])" :key="i">
+                        <div class="flex gap-2">
+                            <span class="text-slate-600 shrink-0" x-text="ln.ts"></span>
+                            <span class="text-slate-300 break-all" x-text="ln.line"></span>
+                        </div>
+                    </template>
+                    <div x-show="!($data.senderRun.data.lines || []).length" class="text-slate-600 italic">waiting for output…</div>
+                </div>
+                <div class="px-3 py-2 flex items-center justify-between bg-slate-900 border-t border-slate-800">
+                    <span class="text-[10px] text-slate-500" x-text="'PID ' + ($data.senderRun.data.pid || '—')"></span>
+                    <div class="flex items-center gap-2">
+                        <span x-show="$data.senderRun.data.summary && !$data.senderRunning" class="text-[10px] font-bold text-emerald-400"
+                              x-text="'✓ ' + ($data.senderRun.data.summary.sent||0) + ' sent · ✗ ' + ($data.senderRun.data.summary.failed||0) + ' failed'"></span>
+                        <button @click="$data.dismissSenderRun()" class="text-[10px] text-slate-400 hover:text-white">Dismiss</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
 </body>
 </html>

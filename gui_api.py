@@ -2296,10 +2296,42 @@ def delete_reminder(reminder_id: int):
 def trigger_due_reminders(background_tasks: BackgroundTasks):
     """Runs the automated next-due-date reminder sender as a background task."""
     def run_sender():
-        subprocess.run([sys.executable, "send_due_reminders.py"], check=False)
+        subprocess.run([sys.executable, "send_due_reminders.py", "--kind", "instant"], check=False)
 
     background_tasks.add_task(run_sender)
     return {"status": "QUEUED", "message": "Next-due-date reminder sender triggered in background."}
+
+
+@app.get("/api/reminders/run-status")
+def reminders_run_status():
+    """Live status of the reminder sender process (instant or scheduled).
+    The sender itself maintains .sender_state.json; GUI polls this."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".sender_state.json")
+    try:
+        with open(path) as f:
+            st = json.load(f)
+    except Exception:
+        return {"running": False, "status": "idle"}
+
+    running = st.get("status") == "running"
+    if running and st.get("pid"):
+        try:
+            os.kill(int(st["pid"]), 0)  # liveness check (no signal sent)
+        except Exception:
+            running = False
+            st["status"] = "crashed"
+    return {
+        "running": running,
+        "run_id": st.get("run_id"),
+        "kind": st.get("kind"),
+        "pid": st.get("pid"),
+        "status": st.get("status"),
+        "started_at": st.get("started_at"),
+        "finished_at": st.get("finished_at"),
+        "updated_at": st.get("updated_at"),
+        "summary": st.get("summary"),
+        "lines": st.get("lines", [])[-80:],
+    }
 
 
 @app.get("/api/reminders/send-log")
