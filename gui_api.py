@@ -2373,9 +2373,14 @@ def _utc_tagged(rows):
 def get_reminder_send_log(limit: int = Query(200, ge=1, le=2000), batch_id: str = None):
     conn = get_db()
     cur = conn.cursor()
+    # NOTE: screenshot column intentionally omitted from base list to speed up
+    # the initial table load. Full image is fetched on-demand via the
+    # dedicated endpoint below.
     if batch_id:
         cur.execute("""
-            SELECT l.*, t.tenant_name, r.display_address
+            SELECT l.id, l.batch_id, l.reminder_id, l.tenant_id, l.phone_number,
+                   l.send_type, l.status, l.error, l.message, l.created_at,
+                   l.sent_at, t.tenant_name, r.display_address
             FROM rental_core.reminder_send_log l
             LEFT JOIN rental_core.tenants t ON l.tenant_id = t.id
             LEFT JOIN rental_core.rooms r ON t.room_id = r.id
@@ -2383,7 +2388,9 @@ def get_reminder_send_log(limit: int = Query(200, ge=1, le=2000), batch_id: str 
         """, (batch_id, limit))
     else:
         cur.execute("""
-            SELECT l.*, t.tenant_name, r.display_address
+            SELECT l.id, l.batch_id, l.reminder_id, l.tenant_id, l.phone_number,
+                   l.send_type, l.status, l.error, l.message, l.created_at,
+                   l.sent_at, t.tenant_name, r.display_address
             FROM rental_core.reminder_send_log l
             LEFT JOIN rental_core.tenants t ON l.tenant_id = t.id
             LEFT JOIN rental_core.rooms r ON t.room_id = r.id
@@ -2395,8 +2402,26 @@ def get_reminder_send_log(limit: int = Query(200, ge=1, le=2000), batch_id: str 
     return _utc_tagged(rows)
 
 
-@app.get("/api/reminders/last-batch")
-def get_reminder_last_batch():
+@app.get("/api/reminders/send-log-screenshot/{log_id}")
+def get_send_log_screenshot(log_id: int):
+    """Return the screenshot base64 data for a single send-log entry.
+
+    Used by the Reminder Send Log table: the "View Screenshot" button
+    fetches exactly one image instead of sending every screenshot base64
+    string in the initial bulk load.
+    """
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT screenshot FROM rental_core.reminder_send_log WHERE id = %s",
+        (log_id,),
+    )
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row or not row[0]:
+        return {"screenshot": None}
+    return {"screenshot": row[0]}
     conn = get_db()
     cur = conn.cursor()
     cur.execute("""

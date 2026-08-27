@@ -2176,12 +2176,7 @@
                                     <button @click="viewLogMessage(row)" class="px-2 py-1 rounded bg-slate-700/70 text-slate-200 hover:bg-slate-600 text-xs font-medium"><i class="fa-solid fa-comment-dots mr-1"></i>Msg</button>
                                 </td>
                                 <td class="p-3">
-                                    <template x-if="row.screenshot">
-                                        <button @click="viewScreenshot(row)" class="px-2 py-1 rounded bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600/40 text-xs font-medium"><i class="fa-solid fa-image mr-1"></i>View</button>
-                                    </template>
-                                    <template x-if="!row.screenshot">
-                                        <span class="text-slate-600 text-xs">—</span>
-                                    </template>
+                                    <button @click="viewScreenshot(row)" class="px-2 py-1 rounded bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600/40 text-xs font-medium"><i class="fa-solid fa-image mr-1"></i>View</button>
                                 </td>
                             </tr>
                         </template>
@@ -4030,12 +4025,25 @@ totalTenantPages() {
                     this.showReminderLogModal = true;
                     await this.fetchReminderLog();
                 },
-                viewScreenshot(row) {
-                    if (!row || !row.screenshot) return;
-                    this.screenshotData = 'data:image/png;base64,' + row.screenshot;
-                    this.screenshotMeta = { tenant: row.tenant_id, phone: row.phone_number, type: row.send_type, status: row.status, sentAt: row.sent_at ? fmtDateTime(row.sent_at) : '' };
-                    this.showScreenshotModal = true;
-                },
+viewScreenshot(row) {
+        if (!row || !row.id) return;
+        fetch(`/api/reminders/send-log-screenshot/${row.id}`)
+            .then(res => res.json())
+            .then(data => {
+                if (data.screenshot) {
+                    this.screenshotData = 'data:image/png;base64,' + data.screenshot;
+                } else {
+                    this.screenshotData = '';
+                }
+                this.screenshotMeta = { tenant: row.tenant_id, phone: row.phone_number, type: row.send_type, status: row.status, sentAt: row.sent_at ? this.fmtDateTime(row.sent_at) : '' };
+                this.showScreenshotModal = true;
+            })
+            .catch(err => {
+                console.error('Failed to fetch screenshot:', err);
+                this.screenshotData = '';
+                this.screenshotMeta = {};
+            });
+    },
                 formatReminderDate(d, status) {
                     if (!d) return status === 'NOT_SET' ? 'Not Set' : '—';
                     const s = String(d).slice(0, 10);
