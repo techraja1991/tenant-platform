@@ -356,17 +356,14 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
             # Comparison is alphanumeric-normalized so WhatsApp formatting
             # (bold/italic asterisks, emoji, punctuation) cannot break it.
             target = _re.sub(r'[^a-z0-9]', '', it["message"].lower())[-60:]
-            # Freshly (re)linked sessions render slowly; give the first
-            # sends / first 5 minutes a longer proof window.
-            _warm = i == 0 or (_SESSION_STARTED and time.time() - _SESSION_STARTED < 300)
-            _verify_ms = 150000 if _warm else 90000
+            # Fluent verification: wait for the bubble to appear in the
+            # recipient chat. Single tick (✓) = SENT; clock = not yet.
+            # Keep it simple: 30s for instant (fast), 60s for scheduled.
+            # No reload loop – the chat is already open, and a reload that
+            # lands on the general screen without the chat loses the bubble.
+            _verify_ms = 30000 if args.kind == "instant" else 60000
 
             def _proof_wait(ms):
-                # Single-tick = SUCCESS. As soon as the clock disappears the
-                # message has left our device and is on WhatsApp servers; the
-                # second tick (recipient device) can arrive late and is not
-                # required. We therefore succeed when the bubble exists and
-                # is not pending, regardless of check-icon flavour.
                 page.wait_for_function(
                     """(snip) => {
                         const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -376,36 +373,19 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
                         const mine = outs.filter(b => norm(b.innerText).includes(snip)).pop();
                         if (!mine) return false;
                         const html = mine.innerHTML || '';
-                        if (/status-pending|data-icon=\"clock\"/i.test(html)) return false;   // still queued locally
-                        return true; // bubble exists and clock gone = single tick at least = sent
+                        if (/status-pending|data-icon=\"clock\"/i.test(html)) return false;   // clock → not SENT yet
+                        return /status-check|status-dblcheck|msg-check|msg-dblcheck/i.test(html); // single ✓ or double ✓✓ = SENT
                     }""",
                     arg=target,
                     timeout=ms,
                 )
 
             try:
-                try:
-                    _proof_wait(_verify_ms)
-                    delivered = True
-                except Exception:
-                    probe = 'bubble-not-found'
-                    # Degraded/slow sessions sometimes never render the sent
-                    # bubble even though WhatsApp accepted the message. Reopen
-                    # the chat once — history re-renders from the server — and
-                    # rescan before declaring failure.
-                    try:
-                        page.reload(wait_until="domcontentloaded")
-                        page.wait_for_selector(SELECTOR_INPUT, timeout=20000)
-                        time.sleep(2)
-                        _proof_wait(30000)
-                        delivered = True
-                        probe = None
-                    except Exception:
-                        pass
-                if not delivered:
-                    raise AssertionError('verify-failed')
+                _proof_wait(_verify_ms)
+                delivered = True
+                probe = 'single-check'
             except Exception:
-                # Diagnose WHY for the failure record
+                # Diagnose WHY for the failure record – single check only.
                 try:
                     probe = page.evaluate(
                         """(snip) => {
@@ -415,7 +395,7 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
                             if(!mine) return 'bubble-not-found';
                             const h=mine.innerHTML||'';
                             if(/status-pending|data-icon=\"clock\"/i.test(h)) return 'stuck-pending-clock';
-                            if(/status-check|status-dblcheck/i.test(h)) return 'acked-late';
+                            if(/status-check|status-dblcheck|msg-check|msg-dblcheck/i.test(h)) return 'acked';
                             return 'no-status-icons-detected';
                         }""", target)
                 except Exception:
@@ -687,11 +667,14 @@ def main():
                 pass
 
         try:
+            # Instant runs are triggered per-payment; two rapid saves
+            # (deposit + rent within seconds) would otherwise build the
+            # queue before the second NOTIFY is queued. Debounce 5s so
+            # both land in the same batch and are sent together fluently.
+            if args.kind == "instant":
+                time.sleep(5)
             # Drain loop: messages can be queued while this run is still in
             # progress (queue was built before the browser finished booting).
-            # Instant runs also need a second pass so a concurrent payment
-            # queued after the first build is picked up without waiting for
-            # the 10AM schedule.
             max_passes = 3
             for _pass in range(max_passes):
                 items = build_items(args.month, notify_only=(args.kind == "instant"))
@@ -703,8 +686,12 @@ def main():
                 if args.test_number and not args.dry_run and not args.limit:
                     args.limit = 1
                 _BATCH = datetime.now().strftime("%Y%m%d%H%M%S") + "_" + uuid.uuid4().hex[:6]
-                send_items(items, args.min_delay, args.max_delay, args.dry_run, args.limit,
-                           args.test_number, args.fast)
+                # Instant notifies must feel fluent: type fast, short pause
+                _fast = True if args.kind == "instant" else args.fast
+                _min_d = 10 if args.kind == "instant" else args.min_delay
+                _max_d = 20 if args.kind == "instant" else args.max_delay
+                send_items(items, _min_d, _max_d, args.dry_run, args.limit,
+                           args.test_number, _fast)
                 if args.dry_run or (args.limit and args.limit <= 1):
                     break
         finally:
