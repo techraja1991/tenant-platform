@@ -1367,43 +1367,6 @@ def add_payment(payment: PaymentCreate):
         # Re-sync ledgers for every month this payment touched
         for bm in affected_months:
             _sync_ledger_jama(cur, payment.tenant_id, bm)
-
-        # Instant payment notification: if an ACTIVE reminder date is already
-        # set for this billing_month + type and the due date was NOT changed,
-        # the frontend does not call /api/reminders, so no NOTIFY would be
-        # queued. We must still notify for the payment itself. Queue a
-        # NOTIFY here when an ACTIVE reminder already exists.
-        try:
-            for bm, amt in allocs:
-                rtype = (payment.payment_type or 'RENT').lower()
-                cur.execute("""
-                    SELECT * FROM rental_core.tenant_reminders
-                     WHERE tenant_id = %s AND billing_month = %s AND status = 'ACTIVE'
-                       AND COALESCE(rem_type,'rent') = %s
-                     ORDER BY id LIMIT 1
-                """, (payment.tenant_id, bm, rtype))
-                exist = cur.fetchone()
-                if not exist:
-                    continue
-                # avoid double-queue if frontend just queued via /api/reminders (within 10s)
-                cur.execute("""
-                    SELECT 1 FROM rental_core.reminder_send_log
-                     WHERE reminder_id = %s AND send_type='NOTIFY' AND status='QUEUED'
-                       AND created_at > now() - interval '10 seconds' LIMIT 1
-                """, (exist['id'],))
-                if cur.fetchone():
-                    continue
-                payload = rm.reminder_payload(cur, exist, rem_type=rtype,
-                                              paid_amount=amt, paid_date=payment.payment_date)
-                cur.execute("""
-                    INSERT INTO rental_core.reminder_send_log
-                    (batch_id, reminder_id, tenant_id, phone_number, send_type, message, status)
-                    VALUES (%s,%s,%s,%s,%s,%s,'QUEUED')
-                """, (datetime.now().strftime("%Y%m%d%H%M%S") + "_pay",
-                      exist['id'], exist['tenant_id'], payload['phone_number'],
-                      'NOTIFY', payload['notify']))
-        except Exception:
-            pass  # payment itself must not fail because of notify queue
         conn.commit()
         return {"status": "SUCCESS", "payment_ids": new_ids, "batch_id": batch_id}
     except HTTPException:

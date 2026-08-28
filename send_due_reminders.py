@@ -361,7 +361,7 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
             # Keep it simple: 30s for instant (fast), 60s for scheduled.
             # No reload loop – the chat is already open, and a reload that
             # lands on the general screen without the chat loses the bubble.
-            _verify_ms = 30000 if args.kind == "instant" else 60000
+            _verify_ms = 30000 if fast else 60000
 
             def _proof_wait(ms):
                 page.wait_for_function(

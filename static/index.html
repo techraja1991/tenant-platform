@@ -3344,27 +3344,53 @@ totalTenantPages() {
                     this.fetchStats();
 
                     // Inline due date: create reminder for balance in the same save
+                    // FIX: Always notify for payment even when due_date not changed.
+                    // If user didn't pick a new due_date but an ACTIVE reminder
+                    // already exists for this billing_month+type, reuse its date
+                    // so the payment-ack NOTIFY is still queued.
                     const remaining = this.remainingAfterPayment;
-                    if (remaining > 0 && this.newPayment.due_date) {
-                        try {
-                            await fetch('/api/reminders', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                    tenant_id: Number(this.newPayment.tenant_id),
-                                    billing_month: this.newPayment.payment_type === 'DEPOSIT' ? this.currentBillingPeriod() : (this.newPayment.allocations.find(a => Number(a.amount) > 0)?.billing_month || this.newPayment.billing_month),
-                                    reminder_date: this.newPayment.due_date,
-                                    amount_due: remaining,
-                                    note: (this.newPayment.payment_type === 'DEPOSIT' ? 'Deposit balance' : 'Balance after part payment'),
-                                    rem_type: this.newPayment.payment_type.toLowerCase(),
-                                    paid_amount: this.newPayment.payment_type === 'DEPOSIT' ? (Number(this.newPayment.amount) || 0) : (this.paymentTotal || 0),
-                                    paid_date: this.newPayment.payment_date
-                                })
-                            });
-                            this.toast('Payment saved. Due date set for balance ₹' + Number(remaining).toLocaleString('en-IN') + '.', 'success', 5000);
-                            if (this.currentTab === 'reminders') this.fetchReminders();
-                        } catch (e) {
-                            this.toast('Payment saved, but setting the due date failed: ' + e.message, 'warn', 5000);
+                    if (remaining > 0) {
+                        let dueDateToUse = this.newPayment.due_date;
+                        const billMonth = this.newPayment.payment_type === 'DEPOSIT' ? this.currentBillingPeriod() : (this.newPayment.allocations.find(a => Number(a.amount) > 0)?.billing_month || this.newPayment.billing_month);
+                        const rtype = this.newPayment.payment_type.toLowerCase();
+                        if (!dueDateToUse) {
+                            try {
+                                let active = (this.reminders || []).find(x => Number(x.tenant_id)===Number(this.newPayment.tenant_id) && x.billing_month===billMonth && (x.rem_type||'rent')===rtype && x.status==='ACTIVE');
+                                if (!active) active = (this.reminders || []).find(x => Number(x.tenant_id)===Number(this.newPayment.tenant_id) && (x.rem_type||'rent')===rtype && x.status==='ACTIVE');
+                                if (active && active.reminder_date) dueDateToUse = String(active.reminder_date).slice(0,10);
+                                // fallback: fetch current month reminders if not in memory
+                                if (!dueDateToUse) {
+                                    const rRes = await fetch(`/api/reminders?month=${billMonth}`);
+                                    if (rRes.ok) {
+                                        const list = await rRes.json();
+                                        let a2 = Array.isArray(list) ? list.find(x => Number(x.tenant_id)===Number(this.newPayment.tenant_id) && x.billing_month===billMonth && (x.rem_type||'rent')===rtype && x.status==='ACTIVE') : null;
+                                        if (!a2) a2 = Array.isArray(list) ? list.find(x => Number(x.tenant_id)===Number(this.newPayment.tenant_id) && (x.rem_type||'rent')===rtype && x.status==='ACTIVE') : null;
+                                        if (a2 && a2.reminder_date) dueDateToUse = String(a2.reminder_date).slice(0,10);
+                                    }
+                                }
+                            } catch(e) {}
+                        }
+                        if (dueDateToUse) {
+                            try {
+                                await fetch('/api/reminders', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({
+                                        tenant_id: Number(this.newPayment.tenant_id),
+                                        billing_month: billMonth,
+                                        reminder_date: dueDateToUse,
+                                        amount_due: remaining,
+                                        note: (this.newPayment.payment_type === 'DEPOSIT' ? 'Deposit balance' : 'Balance after part payment'),
+                                        rem_type: rtype,
+                                        paid_amount: this.newPayment.payment_type === 'DEPOSIT' ? (Number(this.newPayment.amount) || 0) : (this.paymentTotal || 0),
+                                        paid_date: this.newPayment.payment_date
+                                    })
+                                });
+                                this.toast('Payment saved. Due date set for balance ₹' + Number(remaining).toLocaleString('en-IN') + '.', 'success', 5000);
+                                if (this.currentTab === 'reminders') this.fetchReminders();
+                            } catch (e) {
+                                this.toast('Payment saved, but setting the due date failed: ' + e.message, 'warn', 5000);
+                            }
                         }
                     }
                     // Trigger instant NOTIFY dispatch for any queued reminder messages
