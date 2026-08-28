@@ -2204,8 +2204,13 @@
                 <div><span class="text-slate-500">Status:</span> <span x-text="screenshotMeta?.status || '—'"></span></div>
                 <div class="col-span-2"><span class="text-slate-500">Sent At:</span> <span x-text="screenshotMeta?.sentAt || '—'"></span></div>
             </div>
-            <img :src="screenshotData" class="w-full rounded-lg border border-slate-700" alt="WhatsApp send proof">
-            <a :href="screenshotData" download="whatsapp-send-proof.png" class="block w-full text-center px-4 py-3 bg-indigo-600 rounded-lg hover:bg-indigo-500 font-medium text-sm">Download</a>
+            <template x-if="screenshotData">
+                <img :src="screenshotData" class="w-full rounded-lg border border-slate-700" alt="WhatsApp send proof">
+            </template>
+            <template x-if="!screenshotData">
+                <div class="py-8 text-center text-slate-500 text-sm"><i class="fa-solid fa-image fa-2x mb-2 block"></i>No screenshot captured for this entry.<br><span class="text-xs">Screenshot appears only for WhatsApp sends via Playwright.</span></div>
+            </template>
+            <a x-show="screenshotData" :href="screenshotData" download="whatsapp-send-proof.png" class="block w-full text-center px-4 py-3 bg-indigo-600 rounded-lg hover:bg-indigo-500 font-medium text-sm">Download</a>
         </div>
     </div>
 
@@ -4025,25 +4030,24 @@ totalTenantPages() {
                     this.showReminderLogModal = true;
                     await this.fetchReminderLog();
                 },
-viewScreenshot(row) {
-        if (!row || !row.id) return;
-        fetch(`/api/reminders/send-log-screenshot/${row.id}`)
-            .then(res => res.json())
-            .then(data => {
-                if (data.screenshot) {
-                    this.screenshotData = 'data:image/png;base64,' + data.screenshot;
-                } else {
+                async viewScreenshot(row) {
+                    if (!row || !row.id) return;
                     this.screenshotData = '';
-                }
-                this.screenshotMeta = { tenant: row.tenant_id, phone: row.phone_number, type: row.send_type, status: row.status, sentAt: row.sent_at ? this.fmtDateTime(row.sent_at) : '' };
-                this.showScreenshotModal = true;
-            })
-            .catch(err => {
-                console.error('Failed to fetch screenshot:', err);
-                this.screenshotData = '';
-                this.screenshotMeta = {};
-            });
-    },
+                    this.screenshotMeta = { tenant: row.tenant_id, phone: row.phone_number, type: row.send_type, status: row.status, sentAt: row.sent_at ? this.fmtDateTime(row.sent_at) : '' };
+                    this.showScreenshotModal = true;
+                    try {
+                        const res = await fetch(`/api/reminders/send-log-screenshot/${row.id}`);
+                        const data = await res.json();
+                        if (data.screenshot) {
+                            this.screenshotData = 'data:image/png;base64,' + data.screenshot;
+                        } else {
+                            this.screenshotData = '';
+                        }
+                    } catch (err) {
+                        console.error('Failed to fetch screenshot:', err);
+                        this.screenshotData = '';
+                    }
+                },
                 formatReminderDate(d, status) {
                     if (!d) return status === 'NOT_SET' ? 'Not Set' : '—';
                     const s = String(d).slice(0, 10);

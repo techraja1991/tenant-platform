@@ -34,7 +34,8 @@ def current_billing_period():
 
 class BasicAuthMiddleware(BaseHTTPMiddleware):
     # Paths that must be fetchable without auth (no secrets; needed for PWA/SW)
-    PUBLIC_PATHS = ("/sw.js", "/static/icons/", "/static/manifest.webmanifest")
+    PUBLIC_PATHS = ("/sw.js", "/static/icons/", "/static/manifest.webmanifest",
+                    "/api/reminders/send-log-screenshot")
 
     async def dispatch(self, request, call_next):
         path = request.url.path
@@ -2419,9 +2420,13 @@ def get_send_log_screenshot(log_id: int):
     row = cur.fetchone()
     cur.close()
     conn.close()
-    if not row or not row[0]:
+    if not row or not row.get("screenshot"):
         return {"screenshot": None}
-    return {"screenshot": row[0]}
+    return {"screenshot": row["screenshot"]}
+
+
+@app.get("/api/reminders/last-batch")
+def get_reminder_last_batch():
     conn = get_db()
     cur = conn.cursor()
     cur.execute("""
