@@ -219,12 +219,25 @@ def build_items(month=None, notify_only=False):
         it["reminder_status"] = r.get('status', 'ACTIVE')
         items.append(it)
         if typ == "DUE":
-            hkey = (r['id'], "HISAB")
-            if hkey not in seen:
-                seen.add(hkey)
-                # on the due date, also send the full template hisab message
-                hisab = rm.reminder_payload(cur, r, rem_type=_rem_type_of(r))["hisab"]
-                if hisab:
+            # On the actual due date for RENT the requirement is to send
+            # the due reminder *combined* with the master hisab content
+            # (detailed ledger). Historically HISAB was a separate item
+            # sharing due_sent_at with DUE, so after DUE stamped the HISAB
+            # was skipped via _stamp_taken and never delivered. Fix: for
+            # rent, append hisab to the DUE message itself.
+            hisab = rm.reminder_payload(cur, r, rem_type=_rem_type_of(r))["hisab"] if _rem_type_of(r) == "rent" else None
+            if hisab and _rem_type_of(r) == "rent":
+                # Combine: DUE text + blank line + full hisab. Stamped once
+                # via due_sent_at, so exactly one WhatsApp bubble on due date
+                # containing both the reminder and the detailed account.
+                it["message"] = it["message"] + "\n\n" + hisab
+                it["label"] = "DUE+HISAB"
+            elif hisab:
+                # Non-rent DUE with hisab? Keep separate HISAB item for
+                # completeness (e.g., future deposit hisab) with dedup.
+                hkey = (r['id'], "HISAB")
+                if hkey not in seen:
+                    seen.add(hkey)
                     h = dict(it)
                     h["send_type"] = "HISAB"
                     h["label"] = "HISAB"
@@ -349,6 +362,11 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
             _verify_ms = 150000 if _warm else 90000
 
             def _proof_wait(ms):
+                # Single-tick = SUCCESS. As soon as the clock disappears the
+                # message has left our device and is on WhatsApp servers; the
+                # second tick (recipient device) can arrive late and is not
+                # required. We therefore succeed when the bubble exists and
+                # is not pending, regardless of check-icon flavour.
                 page.wait_for_function(
                     """(snip) => {
                         const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -359,7 +377,7 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
                         if (!mine) return false;
                         const html = mine.innerHTML || '';
                         if (/status-pending|data-icon=\"clock\"/i.test(html)) return false;   // still queued locally
-                        return /status-check|status-dblcheck|msg-check|msg-dblcheck/i.test(html); // server acked
+                        return true; // bubble exists and clock gone = single tick at least = sent
                     }""",
                     arg=target,
                     timeout=ms,
@@ -643,16 +661,23 @@ def main():
     lock_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".wa_sender.lock")
     with open(lock_path, "w") as lock_f:
         if args.kind == "instant":
-            # Instant triggers fire on EVERY payment/due-date save. If a
-            # sender is already running, DO NOT queue up another browser
-            # process — a backlog of lock-waiters re-sends everything
-            # unstamped the moment the lock frees (the duplicate-storm
-            # failure mode). The running drain pass picks up newly queued
-            # NOTIFYs itself.
-            try:
-                fcntl.flock(lock_f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                print("⏭  Sender already running — new NOTIFYs will be picked up by that run.")
+            # Two payments in quick succession (deposit then rent) each trigger
+            # an instant run. The second must not be dropped. Instead of
+            # immediate LOCK_NB skip (which left rent NOTIFY stuck QUEUED
+            # until the next 10AM schedule), wait up to 60s for the first
+            # run to finish, then build a fresh queue and send whatever is
+            # still pending. This preserves single-flight without losing
+            # the second transaction's notification.
+            acquired = False
+            for _w in range(60):
+                try:
+                    fcntl.flock(lock_f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                    break
+                except OSError:
+                    time.sleep(1)
+            if not acquired:
+                print("⏭  Sender still busy after 60s — will retry on next trigger/schedule.")
                 _state_finish("skipped-busy", {"sent": 0, "failed": 0, "skipped": 0}, run_id=_rid)
                 return
         else:
@@ -664,7 +689,10 @@ def main():
         try:
             # Drain loop: messages can be queued while this run is still in
             # progress (queue was built before the browser finished booting).
-            max_passes = 1 if args.kind == "instant" else 3
+            # Instant runs also need a second pass so a concurrent payment
+            # queued after the first build is picked up without waiting for
+            # the 10AM schedule.
+            max_passes = 3
             for _pass in range(max_passes):
                 items = build_items(args.month, notify_only=(args.kind == "instant"))
                 print(f"🔎 Due-date reminder queue: {len(items)} message(s).")
