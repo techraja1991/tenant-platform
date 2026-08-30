@@ -385,7 +385,7 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
                 delivered = True
                 probe = 'single-check'
             except Exception:
-                # Diagnose WHY for the failure record – single check only.
+                # Diagnose WHY for the failure record – single or double check = PASS
                 try:
                     probe = page.evaluate(
                         """(snip) => {
@@ -401,7 +401,11 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
                 except Exception:
                     probe = 'probe-failed'
                 _DIAG = probe
-                delivered = False
+                # If probe finds single ✓ or double ✓✓, treat as delivered even if wait timed out
+                if probe == 'acked':
+                    delivered = True
+                else:
+                    delivered = False
 
             # Screenshot of the chat right after send attempt (proof)
             screenshot_b64 = None
