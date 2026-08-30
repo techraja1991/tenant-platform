@@ -355,7 +355,7 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
             #      queued locally — the recipient never gets it.
             # Comparison is alphanumeric-normalized so WhatsApp formatting
             # (bold/italic asterisks, emoji, punctuation) cannot break it.
-            target = _re.sub(r'[^a-z0-9]', '', it["message"].lower())[-60:]
+            target = _re.sub(r'[^a-z0-9]', '', it["message"].lower())[-30:]
             # Fluent verification: wait for the bubble to appear in the
             # recipient chat. Single tick (✓) = SENT; clock = not yet.
             # Keep it simple: 30s for instant (fast), 60s for scheduled.
@@ -369,8 +369,17 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
                         const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
                         const main = document.querySelector('#main');
                         if (!main) return false;
-                        const outs = [...document.querySelectorAll('.message-out')];
-                        const mine = outs.filter(b => norm(b.innerText).includes(snip)).pop();
+                        let outs = [...document.querySelectorAll('.message-out')];
+                        // Fallback: some WhatsApp builds use different selectors or virtualized lists
+                        if (outs.length === 0) outs = [...document.querySelectorAll('[data-testid="msg-container"]')];
+                        if (outs.length === 0) outs = [...document.querySelectorAll('#main [data-id]')];
+                        let mine = outs.filter(b => norm(b.innerText).includes(snip)).pop();
+                        if (!mine) {
+                            // Last resort: any element in #main containing snip (handles split bubbles)
+                            const all = [...document.querySelectorAll('#main *')];
+                            mine = all.filter(b => b.children.length === 0 && norm(b.innerText).includes(snip)).pop();
+                            if (mine) mine = mine.closest('.message-out') || mine.closest('[data-testid="msg-container"]') || mine;
+                        }
                         if (!mine) return false;
                         const html = mine.innerHTML || '';
                         if (/status-pending|data-icon=\"clock\"/i.test(html)) return false;   // clock → not SENT yet
@@ -390,8 +399,15 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
                     probe = page.evaluate(
                         """(snip) => {
                             const norm=(s)=>(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
-                            const outs=[...document.querySelectorAll('.message-out')];
-                            const mine=outs.filter(b=>norm(b.innerText).includes(snip)).pop();
+                            let outs=[...document.querySelectorAll('.message-out')];
+                            if(outs.length===0) outs=[...document.querySelectorAll('[data-testid="msg-container"]')];
+                            if(outs.length===0) outs=[...document.querySelectorAll('#main [data-id]')];
+                            let mine=outs.filter(b=>norm(b.innerText).includes(snip)).pop();
+                            if(!mine){
+                                const all=[...document.querySelectorAll('#main *')];
+                                mine=all.filter(b=>b.children.length===0 && norm(b.innerText).includes(snip)).pop();
+                                if(mine) mine=mine.closest('.message-out')||mine.closest('[data-testid="msg-container"]')||mine;
+                            }
                             if(!mine) return 'bubble-not-found';
                             const h=mine.innerHTML||'';
                             if(/status-pending|data-icon=\"clock\"/i.test(h)) return 'stuck-pending-clock';
