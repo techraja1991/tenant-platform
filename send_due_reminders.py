@@ -381,9 +381,14 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
                             if (mine) mine = mine.closest('.message-out') || mine.closest('[data-testid="msg-container"]') || mine;
                         }
                         if (!mine) return false;
-                        const html = mine.innerHTML || '';
-                        if (/status-pending|data-icon=\"clock\"/i.test(html)) return false;   // clock → not SENT yet
-                        return /status-check|status-dblcheck|msg-check|msg-dblcheck/i.test(html); // single ✓ or double ✓✓ = SENT
+                        // Robust check: look for check/clock icons via querySelector as well as innerHTML
+                        const hasClock = !!mine.querySelector('[data-icon*="clock"]') || /status-pending|data-icon=\"clock\"/i.test(mine.innerHTML || '');
+                        if (hasClock) return false;   // clock → not SENT yet
+                        const hasCheck = !!mine.querySelector('[data-icon*="check"]') || /status-check|msg-check/i.test(mine.innerHTML || '');
+                        // Also check parent row for check icon (WhatsApp sometimes places it outside bubble)
+                        const row = mine.closest('[data-id]') || mine.parentElement;
+                        const hasCheckInRow = row ? (!!row.querySelector('[data-icon*="check"]')) : false;
+                        return hasCheck || hasCheckInRow; // single ✓ or double ✓✓ = SENT
                     }""",
                     arg=target,
                     timeout=ms,
@@ -409,9 +414,12 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
                                 if(mine) mine=mine.closest('.message-out')||mine.closest('[data-testid="msg-container"]')||mine;
                             }
                             if(!mine) return 'bubble-not-found';
-                            const h=mine.innerHTML||'';
-                            if(/status-pending|data-icon=\"clock\"/i.test(h)) return 'stuck-pending-clock';
-                            if(/status-check|status-dblcheck|msg-check|msg-dblcheck/i.test(h)) return 'acked';
+                            const hasClock = !!mine.querySelector('[data-icon*="clock"]') || /status-pending|data-icon=\"clock\"/i.test(mine.innerHTML||'');
+                            if(hasClock) return 'stuck-pending-clock';
+                            const hasCheck = !!mine.querySelector('[data-icon*="check"]') || /status-check|msg-check/i.test(mine.innerHTML||'');
+                            const row = mine.closest('[data-id]') || mine.parentElement;
+                            const hasCheckInRow = row ? !!row.querySelector('[data-icon*="check"]') : false;
+                            if(hasCheck || hasCheckInRow) return 'acked';
                             return 'no-status-icons-detected';
                         }""", target)
                 except Exception:
@@ -438,10 +446,11 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
                 "phone_number": it["phone_number"], "billing_month": it["billing_month"],
             }
             if delivered:
-                log_reminder_send(_BATCH, reminder, it["send_type"], it["message"], "SENT",
-                                  screenshot_b64=screenshot_b64)
                 if it.get("log_id"):
-                    _mark_log_sent(it["log_id"])
+                    _mark_log_sent(it["log_id"], screenshot_b64)
+                else:
+                    log_reminder_send(_BATCH, reminder, it["send_type"], it["message"], "SENT",
+                                      screenshot_b64=screenshot_b64)
                 stamp_reminder_sent(it["reminder_id"], it.get("stamp_col", "notify_sent_at"))
                 sent += 1
                 print(f"   ✅ Sent {it['label']} to tenant {it['tenant_id']}")
@@ -452,10 +461,11 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
                     'acked-late': 'Ack arrived late',
                     'no-status-icons-detected': 'No delivery-status icons found on bubble',
                 }.get(_DIAG, 'Delivery not confirmed in chat')
-                log_reminder_send(_BATCH, reminder, it["send_type"], it["message"], "FAILED",
-                                  error=reason, screenshot_b64=screenshot_b64)
                 if it.get("log_id"):
-                    _mark_log_failed(it["log_id"], reason)
+                    _mark_log_failed(it["log_id"], reason, screenshot_b64)
+                else:
+                    log_reminder_send(_BATCH, reminder, it["send_type"], it["message"], "FAILED",
+                                      error=reason, screenshot_b64=screenshot_b64)
                 if _DIAG in ('stuck-pending-clock', 'bubble-not-found',
                              'acked-late', 'no-status-icons-detected') \
                         and it["send_type"] in ("D1", "DUE", "HISAB"):
@@ -489,29 +499,43 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
     _LAST_SUMMARY = {"sent": sent, "failed": failed, "skipped": skipped}
 
 
-def _mark_log_failed(log_id, error):
+def _mark_log_failed(log_id, error, screenshot_b64=None):
     """Terminal FAILED on the original queued row — prevents drain-loop
     re-picks (duplicate sends) and phantom QUEUED entries."""
     conn = get_db_connection(as_dict=True)
     cur = conn.cursor()
-    cur.execute("""
-        UPDATE rental_core.reminder_send_log
-           SET status = 'FAILED', error = %s, sent_at = now()
-         WHERE id = %s AND status = 'QUEUED'
-    """, (error, log_id))
+    if screenshot_b64:
+        cur.execute("""
+            UPDATE rental_core.reminder_send_log
+               SET status = 'FAILED', error = %s, sent_at = now(), screenshot = %s
+             WHERE id = %s AND status = 'QUEUED'
+        """, (error, screenshot_b64, log_id))
+    else:
+        cur.execute("""
+            UPDATE rental_core.reminder_send_log
+               SET status = 'FAILED', error = %s, sent_at = now()
+             WHERE id = %s AND status = 'QUEUED'
+        """, (error, log_id))
     conn.commit()
     cur.close()
     conn.close()
 
 
-def _mark_log_sent(log_id):
+def _mark_log_sent(log_id, screenshot_b64=None):
     conn = get_db_connection(as_dict=True)
     cur = conn.cursor()
-    cur.execute("""
-        UPDATE rental_core.reminder_send_log
-           SET status = 'SENT', sent_at = now()
-         WHERE id = %s AND status = 'QUEUED'
-    """, (log_id,))
+    if screenshot_b64:
+        cur.execute("""
+            UPDATE rental_core.reminder_send_log
+               SET status = 'SENT', sent_at = now(), screenshot = %s
+             WHERE id = %s AND status = 'QUEUED'
+        """, (screenshot_b64, log_id))
+    else:
+        cur.execute("""
+            UPDATE rental_core.reminder_send_log
+               SET status = 'SENT', sent_at = now()
+             WHERE id = %s AND status = 'QUEUED'
+        """, (log_id,))
     conn.commit()
     cur.close()
     conn.close()
