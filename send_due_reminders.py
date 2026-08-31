@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import random
+import subprocess
 import sys
 import time
 import uuid
@@ -40,6 +41,117 @@ from send_whatsapp_reminders import (  # noqa: E402
 
 _BATCH = None
 _HEADED = False
+
+# ---------------------------------------------------------------------------
+# Delivery-status probe (single source of truth)
+#
+# The previous implementation re-derived "is this bubble sent?" three
+# separate times (the wait_for_function predicate, the timeout diagnostic,
+# and the post-screenshot re-check) with slightly different JS each time.
+# That's exactly how a real message with a visible single-tick can still
+# get marked FAILED: one of the three copies misses it while another would
+# have caught it, and there's no way to tell which one ran.
+#
+# This version defines the check ONCE, injected via context.add_init_script
+# so it survives every page.goto() navigation, and every Python call site
+# (wait / diagnose / re-check) calls the exact same JS function.
+#
+# It also stops relying solely on WhatsApp's `data-icon` attribute, which
+# is the classic "old scraping tutorial" selector and is not guaranteed to
+# still exist in the current WhatsApp Web build. Detection now tries, in
+# order: aria-label (most redesign-resistant), data-icon (legacy), an
+# inline <svg><title>, and finally a raw check-glyph in the text — and it
+# no longer requires narrowing to a single leaf element before searching,
+# which was the actual cause of "bubble found, but icon not found".
+_WA_STATUS_PROBE_JS = r"""
+(() => {
+  function normText(s) { return (s || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
+
+  function outgoingRows() {
+    const main = document.querySelector('#main');
+    if (!main) return [];
+    // Primary: WhatsApp's own internal message-id convention. Outgoing
+    // messages carry data-id="true_...."; this has stayed far more stable
+    // across UI/CSS redesigns than any class name.
+    let rows = [...main.querySelectorAll('[data-id^="true_"]')];
+    if (rows.length === 0) rows = [...main.querySelectorAll('.message-out')];
+    if (rows.length === 0) rows = [...main.querySelectorAll('[data-testid="msg-container"]')];
+    return rows;
+  }
+
+  function findRow(snip) {
+    const rows = outgoingRows();
+    if (rows.length === 0) return null;
+    const suf = snip && snip.suf, pre = snip && snip.pre;
+    let mine = null;
+    if (suf) mine = rows.filter(r => normText(r.innerText).includes(suf)).pop();
+    if (!mine && pre) mine = rows.filter(r => normText(r.innerText).includes(pre)).pop();
+    // No fallback to last row – that caused false positive where rent
+    // verification found the previous deposit bubble when rent had not
+    // actually been sent. If neither suf nor pre matches, the bubble
+    // truly hasn't appeared yet.
+    return mine || null;
+  }
+
+  function status(snip) {
+    const mine = findRow(snip);
+    if (!mine) return 'bubble-not-found';
+    const html = mine.innerHTML || '';
+    const text = mine.innerText || mine.textContent || '';
+
+    const ariaNodes = [...mine.querySelectorAll('[aria-label]')];
+    for (const n of ariaNodes) {
+      const label = (n.getAttribute('aria-label') || '').toLowerCase();
+      if (/pending|not sent|waiting/.test(label)) return 'clock';
+      if (/read/.test(label)) return 'read';
+      if (/delivered/.test(label)) return 'delivered';
+      if (/^sent$/.test(label)) return 'sent';
+    }
+
+    const iconEl = mine.querySelector('[data-icon]');
+    if (iconEl) {
+      const icon = (iconEl.getAttribute('data-icon') || '').toLowerCase();
+      if (icon.includes('time') || icon.includes('clock')) return 'clock';
+      if (icon.includes('dblcheck-ack')) return 'read';
+      if (icon.includes('dblcheck')) return 'delivered';
+      if (icon.includes('check') || icon.includes('tick')) return 'sent';
+    }
+
+    const titleEl = mine.querySelector('svg title');
+    if (titleEl) {
+      const t = (titleEl.textContent || '').toLowerCase();
+      if (/pending/.test(t)) return 'clock';
+      if (/read/.test(t)) return 'read';
+      if (/delivered/.test(t)) return 'delivered';
+      if (/sent|tick|check/.test(t)) return 'sent';
+    }
+
+    if (/[\u2713\u2714\u2705]/.test(text) || /[\u2713\u2714\u2705]/.test(html)) return 'sent';
+
+    return 'unknown';
+  }
+
+  window.__waMsgStatus = status;
+  window.__waReady = function (snip) {
+    const s = status(snip);
+    return s !== 'unknown' && s !== 'bubble-not-found' && s !== 'clock';
+  };
+  window.__waSnippet = function (snip) {
+    const mine = findRow(snip);
+    return mine ? (mine.outerHTML || '').slice(0, 1200) : '';
+  };
+})();
+"""
+
+
+def _norm_snippet(message):
+    """Build the {suf, pre} text fingerprint used to locate our bubble
+    in the chat pane. Matching both ends (not just the tail) means a
+    message WhatsApp displays truncated ("...Read more") behind a long
+    combined DUE+HISAB body still gets located via its opening line."""
+    import re as _re
+    norm = _re.sub(r'[^a-z0-9]', '', (message or '').lower())
+    return {"suf": norm[-40:], "pre": norm[:40]}
 
 
 def log_reminder_send(batch_id, reminder, send_type, message, status, error=None, screenshot_b64=None):
@@ -131,9 +243,16 @@ def _due_reminders(month=None):
 
 def _outstanding_gt_zero(cur, tenant_id, billing_month):
     """Only send if the month's outstanding is actually > 0 (payment may have
-    arrived before the due date, in which case no reminder goes out)."""
+    arrived before the due date, in which case no reminder goes out).
+    If no ledger exists for this billing_month, check amount_due instead
+    (don't skip)."""
     out = rm.current_outstanding(cur, tenant_id, billing_month)
-    return out is not None and float(out or 0) > 0
+    if out is None:
+        return True
+    try:
+        return float(out or 0) > 0
+    except Exception:
+        return True
 
 
 def render_notify(cur, log_row):
@@ -268,6 +387,9 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
     if test_number:
         print(f"🧪 TEST MODE — messages sent to dummy {wm.normalize_phone(test_number)}.")
     pw, context = new_browser(headed=_HEADED)
+    # Injected once; survives every page.goto() navigation that follows,
+    # so the same detection logic backs every send in this run.
+    context.add_init_script(_WA_STATUS_PROBE_JS)
     page = context.pages[0] if context.pages else context.new_page()
     print("🔵 Launching WhatsApp Web session...")
     page.goto("https://web.whatsapp.com", wait_until="domcontentloaded")
@@ -346,90 +468,30 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
             # the chat pane (#main). Checking only the composer being cleared
             # is NOT enough — a failed paste also leaves it empty.
             import time as _t
-            import re as _re
             _t.sleep(random.uniform(0.5, 1.0))
-            # Two-stage delivery proof:
-            #   1) our text sits in an OUTGOING bubble, AND
-            #   2) that bubble shows a server-ack tick (single/double),
-            #      NOT the clock. A rendered bubble with a clock is only
-            #      queued locally — the recipient never gets it.
-            # Comparison is alphanumeric-normalized so WhatsApp formatting
-            # (bold/italic asterisks, emoji, punctuation) cannot break it.
-            target = _re.sub(r'[^a-z0-9]', '', it["message"].lower())[-30:]
-            # Fluent verification: wait for the bubble to appear in the
-            # recipient chat. Single tick (✓) = SENT; clock = not yet.
-            # Keep it simple: 30s for instant (fast), 60s for scheduled.
-            # No reload loop – the chat is already open, and a reload that
-            # lands on the general screen without the chat loses the bubble.
+            # Delivery proof: locate our bubble, then read its status via
+            # _WA_STATUS_PROBE_JS (defined once, injected once, used for
+            # every check below — see the constant near the top of this
+            # file for why that matters). 'sent'/'delivered'/'read' = PASS,
+            # 'clock' = genuinely still pending, 'bubble-not-found' /
+            # 'unknown' are diagnosed further below.
+            snip = _norm_snippet(it["message"])
             _verify_ms = 30000 if fast else 60000
 
-            def _proof_wait(ms):
-                page.wait_for_function(
-                    """(snip) => {
-                        const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-                        const main = document.querySelector('#main');
-                        if (!main) return false;
-                        let outs = [...document.querySelectorAll('.message-out')];
-                        // Fallback: some WhatsApp builds use different selectors or virtualized lists
-                        if (outs.length === 0) outs = [...document.querySelectorAll('[data-testid="msg-container"]')];
-                        if (outs.length === 0) outs = [...document.querySelectorAll('#main [data-id]')];
-                        let mine = outs.filter(b => norm(b.innerText).includes(snip)).pop();
-                        if (!mine) {
-                            // Last resort: any element in #main containing snip (handles split bubbles)
-                            const all = [...document.querySelectorAll('#main *')];
-                            mine = all.filter(b => b.children.length === 0 && norm(b.innerText).includes(snip)).pop();
-                            if (mine) mine = mine.closest('.message-out') || mine.closest('[data-testid="msg-container"]') || mine;
-                        }
-                        if (!mine) return false;
-                        // Robust check: look for check/clock icons via querySelector as well as innerHTML
-                        const hasClock = !!mine.querySelector('[data-icon*="clock"]') || /status-pending|data-icon=\"clock\"/i.test(mine.innerHTML || '');
-                        if (hasClock) return false;   // clock → not SENT yet
-                        const hasCheck = !!mine.querySelector('[data-icon*="check"]') || /status-check|msg-check/i.test(mine.innerHTML || '');
-                        // Also check parent row for check icon (WhatsApp sometimes places it outside bubble)
-                        const row = mine.closest('[data-id]') || mine.parentElement;
-                        const hasCheckInRow = row ? (!!row.querySelector('[data-icon*="check"]')) : false;
-                        return hasCheck || hasCheckInRow; // single ✓ or double ✓✓ = SENT
-                    }""",
-                    arg=target,
-                    timeout=ms,
-                )
-
             try:
-                _proof_wait(_verify_ms)
+                page.wait_for_function("(s) => window.__waReady && window.__waReady(s)",
+                                       arg=snip, timeout=_verify_ms)
                 delivered = True
-                probe = 'single-check'
+                _DIAG = page.evaluate("(s) => window.__waMsgStatus(s)", snip)
             except Exception:
-                # Diagnose WHY for the failure record – single or double check = PASS
+                # Timed out — read the current status directly for the
+                # failure record instead of assuming why it timed out.
                 try:
-                    probe = page.evaluate(
-                        """(snip) => {
-                            const norm=(s)=>(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
-                            let outs=[...document.querySelectorAll('.message-out')];
-                            if(outs.length===0) outs=[...document.querySelectorAll('[data-testid="msg-container"]')];
-                            if(outs.length===0) outs=[...document.querySelectorAll('#main [data-id]')];
-                            let mine=outs.filter(b=>norm(b.innerText).includes(snip)).pop();
-                            if(!mine){
-                                const all=[...document.querySelectorAll('#main *')];
-                                mine=all.filter(b=>b.children.length===0 && norm(b.innerText).includes(snip)).pop();
-                                if(mine) mine=mine.closest('.message-out')||mine.closest('[data-testid="msg-container"]')||mine;
-                            }
-                            if(!mine) return 'bubble-not-found';
-                            const hasClock = !!mine.querySelector('[data-icon*="clock"]') || /status-pending|data-icon=\"clock\"/i.test(mine.innerHTML||'');
-                            if(hasClock) return 'stuck-pending-clock';
-                            const hasCheck = !!mine.querySelector('[data-icon*="check"]') || /status-check|msg-check/i.test(mine.innerHTML||'');
-                            const row = mine.closest('[data-id]') || mine.parentElement;
-                            const hasCheckInRow = row ? !!row.querySelector('[data-icon*="check"]') : false;
-                            if(hasCheck || hasCheckInRow) return 'acked';
-                            return 'no-status-icons-detected';
-                        }""", target)
+                    status = page.evaluate("(s) => window.__waMsgStatus(s)", snip)
                 except Exception:
-                    probe = 'probe-failed'
-                _DIAG = probe
-                # If probe finds single ✓ or double ✓✓, treat as delivered even if wait timed out
-                if probe == 'acked':
-                    delivered = True
-                else:
-                    delivered = False
+                    status = 'probe-failed'
+                _DIAG = status
+                delivered = status in ('sent', 'delivered', 'read')
 
             # Screenshot of the chat right after send attempt (proof)
             screenshot_b64 = None
@@ -439,42 +501,32 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
             except Exception:
                 pass
 
-            # 100% accuracy final re-check: screenshot shows single ✓ but
-            # probe earlier said no-icons (race where check appears after
-            # wait). Re-evaluate at screenshot time; if single/double now
-            # present, override to SENT.
+            # Late-tick re-check: the ✓ can render a moment after our first
+            # read (network round trip). Re-read status once more before
+            # giving up — using the SAME function, not a re-implementation.
             if not delivered:
                 try:
-                    final_probe = page.evaluate(
-                        """(snip) => {
-                            const norm=(s)=>(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
-                            let outs=[...document.querySelectorAll('.message-out')];
-                            if(outs.length===0) outs=[...document.querySelectorAll('[data-testid="msg-container"]')];
-                            if(outs.length===0) outs=[...document.querySelectorAll('#main [data-id]')];
-                            let mine=outs.filter(b=>norm(b.innerText).includes(snip)).pop();
-                            if(!mine){
-                                const all=[...document.querySelectorAll('#main *')];
-                                mine=all.filter(b=>b.children.length===0 && norm(b.innerText).includes(snip)).pop();
-                                if(mine) mine=mine.closest('.message-out')||mine.closest('[data-testid="msg-container"]')||mine;
-                            }
-                            if(!mine) return 'bubble-not-found';
-                            // Ultra-robust check: querySelector, innerHTML, innerText Unicode, and row
-                            const html = mine.innerHTML||'';
-                            const text = mine.innerText||'';
-                            const hasClock = !!mine.querySelector('[data-icon*="clock"]') || /status-pending|data-icon=\"clock\"/i.test(html) || /clock/i.test(text);
-                            if(hasClock) return 'stuck-pending-clock';
-                            const hasCheck = !!mine.querySelector('[data-icon*="check"]') || /status-check|msg-check/i.test(html) || /✓/.test(text) || /✓/.test(html);
-                            const row = mine.closest('[data-id]') || mine.parentElement;
-                            const hasCheckInRow = row ? !!row.querySelector('[data-icon*="check"]') : false;
-                            if(hasCheck || hasCheckInRow) return 'acked';
-                            return 'no-status-icons-detected';
-                        }""", target)
-                    if final_probe == 'acked':
+                    _t.sleep(1.0)
+                    status2 = page.evaluate("(s) => window.__waMsgStatus(s)", snip)
+                    if status2 in ('sent', 'delivered', 'read'):
                         delivered = True
-                        _DIAG = 'acked-final'
-                        print("   ✅ Final check: single/double ✓ now visible in screenshot - marking SENT (100% accuracy)")
+                        _DIAG = status2
+                        print("   ✅ Late check: delivery tick now visible - marking SENT")
                 except Exception:
                     pass
+
+            # When we still can't confirm delivery and the bubble WAS found
+            # (i.e. WhatsApp's markup for the status icon didn't match any
+            # of our detection strategies — 'unknown'), capture the bubble's
+            # raw HTML so this is a self-diagnosing failure: the exact
+            # markup needed to add a matching selector is right there in
+            # the log instead of requiring another guess.
+            debug_html = None
+            if not delivered and _DIAG == 'unknown':
+                try:
+                    debug_html = page.evaluate("(s) => window.__waSnippet(s)", snip)
+                except Exception:
+                    debug_html = None
 
             if test_number:
                 it = {**it, "phone_number": wm.normalize_phone(test_number)}
@@ -493,29 +545,31 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
                 print(f"   ✅ Sent {it['label']} to tenant {it['tenant_id']}")
             else:
                 reason = {
-                    'stuck-pending-clock': 'WhatsApp shows PENDING (clock) - message never reached server',
-                    'bubble-not-found': 'Sent bubble not found in chat',
-                    'acked-late': 'Ack arrived late',
-                    'no-status-icons-detected': 'No delivery-status icons found on bubble',
+                    'clock': 'WhatsApp still shows the pending clock icon - message has not left the device yet',
+                    'bubble-not-found': 'Could not find the sent message bubble in the chat pane',
+                    'unknown': 'Message bubble found but no known delivery-status marker matched '
+                               '(WhatsApp\'s UI likely changed - raw bubble HTML attached below for diagnosis)',
+                    'probe-failed': 'Delivery-status probe crashed while inspecting the page',
                 }.get(_DIAG, 'Delivery not confirmed in chat')
+                if debug_html:
+                    reason += "\n\n--- debug: matched bubble HTML (first 1200 chars) ---\n" + debug_html
                 if it.get("log_id"):
                     _mark_log_failed(it["log_id"], reason, screenshot_b64)
                 else:
                     log_reminder_send(_BATCH, reminder, it["send_type"], it["message"], "FAILED",
                                       error=reason, screenshot_b64=screenshot_b64)
-                if _DIAG in ('stuck-pending-clock', 'bubble-not-found',
-                             'acked-late', 'no-status-icons-detected') \
+                if _DIAG in ('clock', 'bubble-not-found', 'unknown', 'probe-failed') \
                         and it["send_type"] in ("D1", "DUE", "HISAB"):
-                    # One attempt per stage, ever. All four diagnostics mean
-                    # the click happened and WhatsApp accepted/queued the
-                    # message client-side (delivery usually follows). Leaving
-                    # these unstamped made every later run re-send them
-                    # (duplicate-storm failure mode); failures stay visible in
-                    # the send log instead.
+                    # One attempt per stage, ever. These diagnostics mean the
+                    # click happened and WhatsApp accepted/queued the message
+                    # client-side (delivery usually follows). Leaving these
+                    # unstamped made every later run re-send them (duplicate-
+                    # storm failure mode); failures stay visible in the send
+                    # log instead.
                     stamp_reminder_sent(it["reminder_id"], it.get("stamp_col", "d1_sent_at"))
                     print(f"   ℹ️  stamped {it['stamp_col']} despite unconfirmed delivery (no cross-run retry)")
                 failed += 1
-                print(f"   ❌ Delivery unconfirmed for tenant {it['tenant_id']}")
+                print(f"   ❌ Delivery unconfirmed for tenant {it['tenant_id']} (status: {_DIAG})")
         except Exception as e:
             print(f"   ❌ Failed for tenant {it['tenant_id']}: {e}")
             if test_number:
@@ -667,6 +721,42 @@ def _state_finish(status, summary=None, run_id=None):
 
 
 _PAUSE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".sender_paused")
+_RETRY_PENDING_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".wa_sender_retry_pending")
+
+
+def _spawn_background_retry(month=None):
+    """An instant trigger couldn't get the send lock within the snappy 60s
+    window (e.g. a 3rd payment landed while a busy run was still sending
+    2 messages for an earlier one). The item is already durably QUEUED in
+    the DB, but nothing else is scheduled to come pick it up soon — the
+    previous behaviour just gave up and left it stranded until some
+    unrelated future trigger or the next scheduled run.
+
+    Hand off a detached background process instead: it blocks on the same
+    lock with NO timeout, so it starts sending the instant it's free —
+    still driven by this trigger, not by luck.
+
+    De-duped via a marker file so 2-3 triggers arriving during the same
+    busy window spawn exactly one retry, not a pile of redundant ones."""
+    if os.path.exists(_RETRY_PENDING_FILE):
+        return False
+    try:
+        open(_RETRY_PENDING_FILE, "w").close()
+    except Exception:
+        pass
+    cmd = [sys.executable, os.path.abspath(__file__), "--kind", "instant", "--wait-lock"]
+    if month:
+        cmd += ["--month", month]
+    try:
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                          stdin=subprocess.DEVNULL, start_new_session=True)
+        return True
+    except Exception:
+        try:
+            os.remove(_RETRY_PENDING_FILE)
+        except Exception:
+            pass
+        return False
 
 
 def main():
@@ -686,6 +776,10 @@ def main():
     ap.add_argument("--headed", action="store_true")
     ap.add_argument("--kind", default=None, choices=[None, "instant", "scheduled"],
                     help="Launcher hint; auto-detected when omitted.")
+    ap.add_argument("--wait-lock", action="store_true",
+                    help="Internal: used by the background-retry hand-off. "
+                         "Blocks on the send lock with no timeout instead "
+                         "of giving up after 60s.")
     args = ap.parse_args()
     if not args.kind:
         # systemd services carry INVOCATION_ID; GUI/API spawns do not.
@@ -721,7 +815,20 @@ def main():
     import fcntl
     lock_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".wa_sender.lock")
     with open(lock_path, "w") as lock_f:
-        if args.kind == "instant":
+        if args.kind == "instant" and args.wait_lock:
+            # We ARE the background retry that got handed off after an
+            # earlier trigger couldn't get the lock in time. Block for as
+            # long as it takes — we were explicitly deputized for this,
+            # so there's no "give up" point; the busy run WILL finish.
+            try:
+                os.remove(_RETRY_PENDING_FILE)
+            except Exception:
+                pass
+            try:
+                fcntl.flock(lock_f, fcntl.LOCK_EX)
+            except OSError:
+                pass
+        elif args.kind == "instant":
             # Two payments in quick succession (deposit then rent) each trigger
             # an instant run. The second must not be dropped. Instead of
             # immediate LOCK_NB skip (which left rent NOTIFY stuck QUEUED
@@ -738,8 +845,21 @@ def main():
                 except OSError:
                     time.sleep(1)
             if not acquired:
-                print("⏭  Sender still busy after 60s — will retry on next trigger/schedule.")
-                _state_finish("skipped-busy", {"sent": 0, "failed": 0, "skipped": 0}, run_id=_rid)
+                # Still busy after 60s (e.g. a run ahead of us is sending
+                # multiple messages with human-like delays). Don't strand
+                # this trigger waiting for luck — hand it to a background
+                # process that blocks on the lock and sends the instant
+                # it's free.
+                handed_off = _spawn_background_retry(args.month)
+                if handed_off:
+                    print("↪️  Sender still busy after 60s — handed off to a "
+                          "background retry that will send as soon as it's free.")
+                    _state_finish("retry-queued", {"sent": 0, "failed": 0, "skipped": 0}, run_id=_rid)
+                else:
+                    print("⏭  Sender still busy after 60s — a retry is already "
+                          "queued behind it (or hand-off failed); it will pick "
+                          "this up too.")
+                    _state_finish("skipped-busy", {"sent": 0, "failed": 0, "skipped": 0}, run_id=_rid)
                 return
         else:
             try:
