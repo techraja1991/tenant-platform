@@ -4,13 +4,17 @@ import subprocess
 import json
 import psycopg2
 import psycopg2.extras
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional, List
+from pathlib import Path
+from dotenv import load_dotenv
+# Load .env explicitly so AUTH_USER/AUTH_PASSWORD apply even if import order changes
+load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 from db_config import get_db_connection
 import whatsapp_message as wm
 import reminder_message as rm
@@ -42,14 +46,19 @@ class BasicAuthMiddleware(BaseHTTPMiddleware):
         if any(path == p or path.startswith(p) for p in self.PUBLIC_PATHS):
             return await call_next(request)
         auth = request.headers.get("Authorization")
+        authorized = False
         if auth and auth.startswith("Basic "):
             try:
                 decoded = base64.b64decode(auth.split(" ", 1)[1]).decode("utf-8")
-                user, _, pw = decoded.partition(":")
-                if user == AUTH_USER and pw == AUTH_PASSWORD:
-                    return await call_next(request)
             except Exception:
-                pass
+                decoded = None
+            if decoded:
+                user, _, pw = decoded.partition(":")
+                authorized = (user == AUTH_USER and pw == AUTH_PASSWORD)
+        # NOTE: call_next is deliberately OUTSIDE the try block — endpoint
+        # exceptions must propagate as 5xx, never be swallowed into a 401.
+        if authorized:
+            return await call_next(request)
         return JSONResponse(
             status_code=401,
             headers={"WWW-Authenticate": 'Basic realm="Tenant Admin"'},
@@ -234,6 +243,106 @@ def get_dashboard_stats():
             for p in outstanding_by_property
         ]
     }
+
+
+# --- 1b. REPORT DASHBOARD (monthly + property-monthly aggregates) ---
+@app.get("/api/reports/monthly-summary")
+def report_monthly_summary():
+    """Per-month collection report across all properties, oldest first."""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT billing_month,
+               COALESCE(SUM(month_total), 0) AS total_billed,
+               COALESCE(SUM(gross_baki), 0) AS gross_billed,
+               COALESCE(SUM(jama), 0) AS collected,
+               COALESCE(SUM(prev_baki), 0) AS initial_pending,
+               COALESCE(SUM(prev_baki), 0) - COALESCE(SUM(prev_jama), 0) AS initial_outstanding_net,
+               COALESCE(SUM(CASE WHEN new_baki > 0 THEN new_baki ELSE 0 END), 0) AS outstanding_pending,
+               COALESCE(SUM(new_baki), 0) AS outstanding_net,
+               COUNT(*) AS units
+        FROM rental_core.monthly_ledgers
+        GROUP BY billing_month
+        ORDER BY billing_month ASC;
+    """)
+    months = []
+    for r in cur.fetchall():
+        bm = r['billing_month']
+        try:
+            label = datetime.strptime(bm, "%Y-%m").strftime("%b %Y")
+        except Exception:
+            label = bm
+        total_billed = float(r['total_billed'] or 0)
+        gross_billed = float(r['gross_billed'] or 0)
+        collected = float(r['collected'] or 0)
+        months.append({
+            "billing_month": bm,
+            "month_label": label,
+            "total_billed": total_billed,
+            "gross_billed": gross_billed,
+            "collected": collected,
+            "initial_pending": float(r['initial_pending'] or 0),
+            "initial_outstanding_net": float(r['initial_outstanding_net'] or 0),
+            "outstanding_pending": float(r['outstanding_pending'] or 0),
+            "outstanding_net": float(r['outstanding_net'] or 0),
+            "units": r['units'],
+            "recovery_pct": round(collected / gross_billed * 100, 1) if gross_billed else 0.0,
+            "recovery_on_month_pct": round(collected / total_billed * 100, 1) if total_billed else 0.0,
+        })
+    cur.close()
+    conn.close()
+    return {"months": months}
+
+
+@app.get("/api/reports/property-monthly")
+def report_property_monthly():
+    """Per-property per-month collection report, oldest first."""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT ml.billing_month,
+               pm.id AS property_id, pm.apartment_name, pm.plot_number,
+               COALESCE(SUM(ml.month_total), 0) AS total_billed,
+               COALESCE(SUM(ml.gross_baki), 0) AS gross_billed,
+               COALESCE(SUM(ml.jama), 0) AS collected,
+               COALESCE(SUM(ml.prev_baki), 0) AS initial_pending,
+               COALESCE(SUM(CASE WHEN ml.new_baki > 0 THEN ml.new_baki ELSE 0 END), 0) AS outstanding_pending,
+               COALESCE(SUM(ml.new_baki), 0) AS outstanding_net,
+               COUNT(*) AS units
+        FROM rental_core.monthly_ledgers ml
+        JOIN rental_core.rooms r ON ml.room_id = r.id
+        JOIN rental_core.property_masters pm ON r.master_id = pm.id
+        GROUP BY ml.billing_month, pm.id, pm.apartment_name, pm.plot_number
+        ORDER BY ml.billing_month ASC, pm.apartment_name ASC;
+    """)
+    rows = []
+    for r in cur.fetchall():
+        bm = r['billing_month']
+        try:
+            label = datetime.strptime(bm, "%Y-%m").strftime("%b %Y")
+        except Exception:
+            label = bm
+        total_billed = float(r['total_billed'] or 0)
+        gross_billed = float(r['gross_billed'] or 0)
+        collected = float(r['collected'] or 0)
+        rows.append({
+            "billing_month": bm,
+            "month_label": label,
+            "property_id": r['property_id'],
+            "apartment_name": r['apartment_name'],
+            "plot_number": r['plot_number'],
+            "total_billed": total_billed,
+            "gross_billed": gross_billed,
+            "collected": collected,
+            "initial_pending": float(r['initial_pending'] or 0),
+            "outstanding_pending": float(r['outstanding_pending'] or 0),
+            "outstanding_net": float(r['outstanding_net'] or 0),
+            "units": r['units'],
+            "recovery_pct": round(collected / gross_billed * 100, 1) if gross_billed else 0.0,
+        })
+    cur.close()
+    conn.close()
+    return {"rows": rows}
 
 
 # --- 2. PROPERTY MASTERS & ROOMS ---
@@ -588,14 +697,28 @@ def update_property(property_id: int, data: PropertyUpdate):
         conn.commit()
         return {"status": "SUCCESS", "message": f"Property #{property_id} updated."}
     except HTTPException:
-        conn.rollback()
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
         raise
     except Exception as e:
-        conn.rollback()
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
         raise HTTPException(status_code=400, detail=str(e))
     finally:
-        cur.close()
-        conn.close()
+        try:
+            cur.close()
+        except:
+            pass
+        try:
+            conn.close()
+        except:
+            pass
 
 @app.get("/api/rooms")
 def list_rooms():
@@ -664,14 +787,28 @@ def update_room(room_id: int, data: RoomUpdate):
         conn.commit()
         return {"status": "SUCCESS", "message": f"Room #{room_id} updated."}
     except HTTPException:
-        conn.rollback()
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
         raise
     except Exception as e:
-        conn.rollback()
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
         raise HTTPException(status_code=400, detail=str(e))
     finally:
-        cur.close()
-        conn.close()
+        try:
+            cur.close()
+        except:
+            pass
+        try:
+            conn.close()
+        except:
+            pass
 
 
 # --- 3. TENANT MANAGEMENT ---
@@ -800,6 +937,28 @@ def tenant_year_ledger(tenant_id: int, year: int = Query(..., ge=2000, le=2100))
             } for u in cur.fetchall()
         ]
 
+        # Get Gujarat Gas bills for this month (only columns that exist in this DB:
+        # customer_number, amount, bill_type, last_pay_date, execution_month)
+        cur.execute("""
+            SELECT gbm.customer_number AS service_number, gbm.amount, gbm.bill_type,
+                   gbm.last_pay_date, gbm.execution_month AS billing_period
+            FROM rental_core.gas_bill_master gbm
+            JOIN rental_core.gas_metrics gm ON gbm.customer_number = gm.customer_number
+            WHERE gm.room_id = %s AND gbm.execution_month = %s
+            ORDER BY gbm.customer_number
+        """, (tenant['room_id'], bm))
+        gas_bills = [
+            {
+                "service_number": g['service_number'],
+                "amount": float(g['amount'] or 0),
+                "bill_type": g['bill_type'],
+                "last_pay_date": str(g['last_pay_date']) if g['last_pay_date'] else None,
+                "billing_period": g['billing_period'],
+                "previous_paid_amount": None,  # not stored in this DB
+                "consumed_units": None,  # not stored in this DB
+            } for g in cur.fetchall()
+        ]
+
         cur.execute("""
             SELECT expense_name, amount, charge_type, room_id
             FROM rental_core.property_maintenance_expenses
@@ -845,7 +1004,11 @@ def tenant_year_ledger(tenant_id: int, year: int = Query(..., ge=2000, le=2100))
             ],
             "misc_expenses": misc_expenses,
             "utility_bills": utility_bills,
+            "gas_bills": gas_bills,
         }
+        def _fnum(v):
+            return float(v) if v is not None else None
+
         if lrow:
             base.update({
                 "prev_baki": float(lrow['prev_baki'] or 0),
@@ -862,6 +1025,16 @@ def tenant_year_ledger(tenant_id: int, year: int = Query(..., ge=2000, le=2100))
                 "payment_status": lrow['payment_status'],
                 "jama_date": lrow['jama_date'],
                 "light_bill_type": lrow['light_bill_type'],
+                # Stored manual overrides (Ledger Edit) + actuals + flag
+                "light_bill_actual": _fnum(lrow.get('light_bill_actual')),
+                "light_bill_manual": _fnum(lrow.get('light_bill_manual')),
+                "gas_bill_actual": _fnum(lrow.get('gas_bill_actual')),
+                "gas_bill_manual": _fnum(lrow.get('gas_bill_manual')),
+                "maintenance_actual": _fnum(lrow.get('maintenance_actual')),
+                "maintenance_manual": _fnum(lrow.get('maintenance_manual')),
+                "common_misc_actual": _fnum(lrow.get('common_misc_actual')),
+                "common_misc_manual": _fnum(lrow.get('common_misc_manual')),
+                "manual_override": bool(lrow.get('manual_override')),
             })
         else:
             base.update({
@@ -870,6 +1043,11 @@ def tenant_year_ledger(tenant_id: int, year: int = Query(..., ge=2000, le=2100))
                 "common_misc_expenses": 0.0, "month_total": 0.0, "gross_baki": 0.0,
                 "jama": 0.0, "new_baki": 0.0, "payment_status": "Not Billed",
                 "jama_date": '0', "light_bill_type": 'NORMAL',
+                "light_bill_actual": None, "light_bill_manual": None,
+                "gas_bill_actual": None, "gas_bill_manual": None,
+                "maintenance_actual": None, "maintenance_manual": None,
+                "common_misc_actual": None, "common_misc_manual": None,
+                "manual_override": False,
             })
         months.append(base)
 
@@ -897,26 +1075,748 @@ def tenant_year_ledger(tenant_id: int, year: int = Query(..., ge=2000, le=2100))
 
     cur.close()
     conn.close()
+    return {"tenant": tenant, "months": months, "deposit": deposit}
+
+
+# ============================================================================
+# 3b. TENANT SETTLEMENT (Final Settlement) ---
+# ============================================================================
+
+class FinalSettlementPreview(BaseModel):
+    lease_end_date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
+    custom_bhadu: Optional[float] = Field(default=None, ge=0)
+    custom_light: Optional[float] = Field(default=None, ge=0)
+    custom_gas: Optional[float] = Field(default=None, ge=0)
+    custom_maintenance: Optional[float] = Field(default=None, ge=0)
+    custom_common: Optional[float] = Field(default=None, ge=0)
+
+
+class SettlementPreview(BaseModel):
+    tenant_id: int
+    tenant_name: str
+    display_address: str
+    phone_number: str
+    lease_end_date: str
+    billing_month: str
+    billing_month_label: str
+    is_half_month: bool
+    prev_baki: float
+    prev_jama: float
+    bhadu_applied: float
+    light_bill: float
+    gas_bill: float
+    estimated_light: Optional[float]
+    estimated_gas: Optional[float]
+    maintenance_applied: float
+    common_misc_expenses: float
+    month_total: float
+    gross_baki: float
+    jama: float
+    new_baki: float
+    outstanding: float
+    deposit_required: float
+    deposit_received: float
+    deposit_pending: float
+    available_for_settlement: float
+    is_receivable: bool
+    is_payable: bool
+    receivable_from_tenant: float
+    payable_to_tenant: float
+    deposit_used: float
+    deposit_refund: float
+    is_receivable: bool
+    is_payable: bool
+    source: str  # 'existing' or 'provisional'
+    deposit_settled: bool
+    deposit_settled_amount: float
+    deposit_settled_date: Optional[str]
+
+
+def _settlement_half_rent(base, stored_half):
+    """Half-month rent: stored value wins, else mapped/derived. Single definition
+    shared by settlement preview and record paths (duplicates drifted before)."""
+    if stored_half is not None and stored_half > 0:
+        return float(stored_half)
+    try:
+        br = int(float(base))
+        _map = {3300: 1700, 6500: 3400, 7000: 3700, 5000: 2600, 2500: 1350, 3000: 1600, 6400: 3300, 0: 0}
+        if br in _map:
+            return float(_map[br])
+    except:
+        pass
+    import math
+    try:
+        return float(math.ceil(float(base or 0) / 2 / 100) * 100)
+    except:
+        return float(base or 0) / 2
+
+
+def _settlement_is_half_month(ls, le, bm):
+    """True when lease starts on/after the 16th or ends on/before the 15th of bm."""
+    try:
+        y, m = map(int, bm.split('-'))
+        if ls:
+            if isinstance(ls, str):
+                ls = datetime.strptime(ls[:10], "%Y-%m-%d").date()
+            if ls.year == y and ls.month == m and ls.day >= 16:
+                return True
+        if le:
+            if isinstance(le, str):
+                le = datetime.strptime(le[:10], "%Y-%m-%d").date()
+            if le.year == y and le.month == m and 1 <= le.day <= 15:
+                return True
+    except:
+        return False
+    return False
+
+
+def _compute_settlement(cur, tenant_id, le_date, billing_month, customs):
+    """Single source of truth for settlement math, shared by the preview (GET)
+    and record (POST) endpoints so the two can never disagree.
+
+    customs: dict with keys bhadu/light/gas/maintenance/common, each a float
+    or None. Non-None values override (preview-only here — POST persists them
+    to the ledger first, then calls with all-None customs).
+    Returns a dict with every intermediate value. Raises 404 if tenant missing.
+    """
+    # 1. Tenant info
+    cur.execute("""
+        SELECT t.*, r.display_address, r.master_id, pm.apartment_name, pm.plot_number,
+               r.half_rent AS room_half_rent, pm.default_half_rent, pm.default_base_rent,
+               r.flat_number, r.display_address
+        FROM rental_core.tenants t
+        LEFT JOIN rental_core.rooms r ON t.room_id = r.id
+        LEFT JOIN rental_core.property_masters pm ON r.master_id = pm.id
+        WHERE t.id = %s
+    """, (tenant_id,))
+    tenant = cur.fetchone()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    # Previous month's new_baki carried forward
+    _prev_bm = (le_date.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+    cur.execute("SELECT COALESCE(new_baki, 0) AS nb FROM rental_core.monthly_ledgers WHERE tenant_id=%s AND billing_month=%s", (tenant_id, _prev_bm))
+    prev_row = cur.fetchone()
+    prev_nb = float(prev_row['nb']) if prev_row and prev_row['nb'] is not None else 0.0
+    if prev_nb >= 0:
+        prev_baki, prev_jama = prev_nb, 0.0
+    else:
+        prev_baki, prev_jama = 0.0, -prev_nb
+
+    # Ledger row for the billing month (None => provisional)
+    cur.execute("SELECT * FROM rental_core.monthly_ledgers WHERE tenant_id = %s AND billing_month = %s", (tenant_id, billing_month))
+    lrow = cur.fetchone()
+
+    # Estimates for provisional months: max of last up-to-6 billed months.
+    estimated_light = None
+    estimated_gas = None
+    if not lrow:
+        cur.execute("""
+            SELECT COALESCE(light_bill, 0) AS lb, COALESCE(gas_bill, 0) AS gb
+            FROM rental_core.monthly_ledgers
+            WHERE tenant_id = %s AND billing_month < %s
+            ORDER BY billing_month DESC LIMIT 6
+        """, (tenant_id, billing_month))
+        _hist = cur.fetchall()
+        if _hist:
+            estimated_light = max(float(r['lb'] or 0) for r in _hist)
+            estimated_gas = max(float(r['gb'] or 0) for r in _hist)
+        else:
+            estimated_light = 0.0
+            estimated_gas = 0.0
+
+    custom_bhadu = customs.get('bhadu')
+    custom_light = customs.get('light')
+    custom_gas = customs.get('gas')
+    custom_maintenance = customs.get('maintenance')
+    custom_common = customs.get('common')
+
+    is_half = False
+    if custom_bhadu is not None:
+        bhadu = float(custom_bhadu)
+    else:
+        base = float(tenant['base_rent_applied'] or tenant['default_base_rent'] or 3300)
+        half_val = tenant.get('half_rent_applied') or tenant.get('room_half_rent') or tenant.get('default_half_rent')
+        half_val = float(half_val) if half_val else 0
+        is_half = _settlement_is_half_month(tenant.get('lease_start_date'), le_date, billing_month)
+        half_computed = _settlement_half_rent(base, half_val)
+        bhadu = half_computed if is_half else base
+
+    if custom_maintenance is not None:
+        maint = float(custom_maintenance)
+    else:
+        maint = float(tenant['maintenance_applied'] or 0)
+
+    if custom_common is not None:
+        common = float(custom_common)
+    else:
+        common = 0.0
+
+    if custom_light is not None:
+        light = float(custom_light)
+    else:
+        light = estimated_light if estimated_light is not None else 0.0
+
+    if custom_gas is not None:
+        gas = float(custom_gas)
+    else:
+        gas = estimated_gas if estimated_gas is not None else 0.0
+
+    # Ledger values win when a row exists (manual overrides already folded into
+    # the effective columns by the DB generated expressions), then customs.
+    if lrow:
+        bhadu = float(lrow['bhadu_applied'] or 0)
+        light = float(lrow.get('light_bill_manual') if lrow.get('light_bill_manual') is not None else (lrow['light_bill'] or 0))
+        gas = float(lrow.get('gas_bill_manual') if lrow.get('gas_bill_manual') is not None else (lrow['gas_bill'] or 0))
+        maint = float(lrow.get('maintenance_manual') if lrow.get('maintenance_manual') is not None else (lrow['maintenance_applied'] or 0))
+        common = float(lrow.get('common_misc_manual') if lrow.get('common_misc_manual') is not None else (lrow['common_misc_expenses'] or 0))
+        if custom_bhadu is not None:
+            bhadu = float(custom_bhadu)
+        if custom_maintenance is not None:
+            maint = float(custom_maintenance)
+        if custom_light is not None:
+            light = float(custom_light)
+        if custom_gas is not None:
+            gas = float(custom_gas)
+
+    month_total = bhadu + light + gas + maint + common
+    gross_baki = prev_baki + month_total - prev_jama
+
+    cur.execute("""
+        SELECT t.security_deposit_applied AS required,
+               COALESCE(SUM(p.amount), 0) AS received
+        FROM rental_core.tenants t
+        LEFT JOIN rental_core.tenant_payments p
+            ON p.tenant_id = t.id AND p.payment_type = 'DEPOSIT'
+        WHERE t.id = %s
+        GROUP BY t.id
+    """, (tenant_id,))
+    deposit_row = cur.fetchone()
+    deposit_required = float(deposit_row['required'] or 0) if deposit_row else 0.0
+    deposit_received = float(deposit_row['received'] or 0) if deposit_row else 0.0
+    deposit_pending = deposit_required - deposit_received
+
+    cur.execute("""
+        SELECT COALESCE(SUM(amount), 0) AS settled
+        FROM rental_core.tenant_payments
+        WHERE tenant_id = %s AND payment_type = 'SETTLEMENT'
+    """, (tenant_id,))
+    settled_row = cur.fetchone()
+    total_settled = float(settled_row['settled'] or 0) if settled_row else 0.0
+
+    cur.execute("""
+        SELECT COALESCE(SUM(amount), 0) AS refunded
+        FROM rental_core.tenant_payments
+        WHERE tenant_id = %s AND payment_type = 'REFUND'
+    """, (tenant_id,))
+    refunded_row = cur.fetchone()
+    total_refunded = float(refunded_row['refunded'] or 0) if refunded_row else 0.0
+
+    # jama = RENT collections for this month (settlement payments never touch it)
+    cur.execute("""
+        SELECT COALESCE(SUM(amount), 0) AS jama
+        FROM rental_core.tenant_payments
+        WHERE tenant_id = %s AND billing_month = %s AND payment_type = 'RENT'
+    """, (tenant_id, billing_month))
+    jama_row = cur.fetchone()
+    jama = float(jama_row['jama'] or 0) if jama_row else 0.0
+
+    outstanding = gross_baki - jama
+
+    if outstanding > 0:
+        deposit_used = min(deposit_received, outstanding)
+        receivable_from_tenant = outstanding - deposit_used
+        deposit_refund = deposit_received - deposit_used
+        payable_to_tenant = deposit_refund
+        remaining_receivable = receivable_from_tenant - total_settled
+        remaining_payable = deposit_refund - total_refunded
+        is_receivable = remaining_receivable > 0.01
+        is_payable = remaining_payable > 0.01
+    else:
+        is_receivable = False
+        receivable_from_tenant = 0.0
+        payable_to_tenant = deposit_received - outstanding  # deposit + credit
+        deposit_used = 0.0
+        deposit_refund = deposit_received - outstanding
+        remaining_receivable = 0.0
+        remaining_payable = deposit_refund - total_refunded
+        is_payable = remaining_payable > 0.01
+
+    deposit_settled = tenant.get('deposit_settled', False)
+    deposit_settled_amount = float(tenant.get('deposit_settled_amount', 0) or 0)
+    deposit_settled_date = tenant.get('deposit_settled_date')
+    if deposit_settled_date:
+        deposit_settled_date = str(deposit_settled_date)
+
+    is_fully_settled = False
+    if is_receivable and is_payable:
+        is_fully_settled = (remaining_receivable <= 0.01) and (remaining_payable <= 0.01)
+    elif is_receivable:
+        is_fully_settled = remaining_receivable <= 0.01
+    elif is_payable:
+        is_fully_settled = remaining_payable <= 0.01
+    else:
+        is_fully_settled = True
+
     return {
-        "tenant": {
-            "id": tenant['id'],
-            "tenant_name": tenant['tenant_name'],
-            "phone_number": tenant['phone_number'],
-            "is_active": str(tenant['is_active']) if tenant['is_active'] else None,
-            "base_rent_applied": float(tenant['base_rent_applied'] or 0),
-            "maintenance_applied": float(tenant['maintenance_applied'] or 0),
-            "security_deposit_applied": float(tenant['security_deposit_applied'] or 0),
-            "lease_start_date": str(tenant['lease_start_date']) if tenant['lease_start_date'] else None,
-            "lease_end_date": str(tenant['lease_end_date']) if tenant['lease_end_date'] else None,
-            "room_id": tenant['room_id'],
-            "display_address": tenant['display_address'],
-            "apartment_name": tenant['apartment_name'],
-            "plot_number": tenant['plot_number'],
-        },
-        "deposit": deposit,
-        "year": year,
-        "months": months,
+        "tenant": tenant,
+        "lrow": lrow,
+        "prev_baki": prev_baki,
+        "prev_jama": prev_jama,
+        "is_half": is_half,
+        "bhadu": bhadu,
+        "light": light,
+        "gas": gas,
+        "maint": maint,
+        "common": common,
+        "estimated_light": estimated_light,
+        "estimated_gas": estimated_gas,
+        "month_total": month_total,
+        "gross_baki": gross_baki,
+        "jama": jama,
+        "outstanding": outstanding,
+        "deposit_required": deposit_required,
+        "deposit_received": deposit_received,
+        "deposit_pending": deposit_pending,
+        "total_settled": total_settled,
+        "total_refunded": total_refunded,
+        "is_receivable": is_receivable,
+        "is_payable": is_payable,
+        "receivable_from_tenant": receivable_from_tenant,
+        "payable_to_tenant": payable_to_tenant,
+        "deposit_used": deposit_used,
+        "deposit_refund": deposit_refund,
+        "remaining_receivable": remaining_receivable,
+        "remaining_payable": remaining_payable,
+        "is_fully_settled": is_fully_settled,
+        "source": 'existing' if lrow else 'provisional',
+        "deposit_settled": deposit_settled,
+        "deposit_settled_amount": deposit_settled_amount,
+        "deposit_settled_date": deposit_settled_date,
     }
+
+
+@app.get("/api/tenants/{tenant_id}/final-settlement")
+async def get_final_settlement(
+    tenant_id: int,
+    lease_end_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    custom_bhadu: Optional[float] = Query(None, ge=0),
+    custom_light: Optional[float] = Query(None, ge=0),
+    custom_gas: Optional[float] = Query(None, ge=0),
+    custom_maintenance: Optional[float] = Query(None, ge=0),
+    custom_common: Optional[float] = Query(None, ge=0),
+):
+    """
+    Preview the full & final settlement for a tenant at a given lease end date.
+    Supports optional custom overrides for bhadu, light, gas, maintenance, common.
+    """
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        try:
+            le_date = datetime.strptime(lease_end_date[:10], "%Y-%m-%d").date()
+        except:
+            raise HTTPException(status_code=400, detail="Invalid lease_end_date format, use YYYY-MM-DD")
+        billing_month = le_date.strftime("%Y-%m")
+
+        # Single source of truth for all settlement math (shared with POST record).
+        s = _compute_settlement(cur, tenant_id, le_date, billing_month, {
+            'bhadu': custom_bhadu, 'light': custom_light, 'gas': custom_gas,
+            'maintenance': custom_maintenance, 'common': custom_common})
+        tenant = s['tenant']
+        lrow = s['lrow']
+        prev_baki = s['prev_baki']
+        prev_jama = s['prev_jama']
+        is_half = s['is_half']
+        bhadu = s['bhadu']
+        light = s['light']
+        gas = s['gas']
+        maint = s['maint']
+        common = s['common']
+        estimated_light = s['estimated_light']
+        estimated_gas = s['estimated_gas']
+        month_total = s['month_total']
+        gross_baki = s['gross_baki']
+        jama = s['jama']
+        outstanding = s['outstanding']
+        deposit_required = s['deposit_required']
+        deposit_received = s['deposit_received']
+        deposit_pending = s['deposit_pending']
+        total_settled = s['total_settled']
+        total_refunded = s['total_refunded']
+        is_receivable = s['is_receivable']
+        is_payable = s['is_payable']
+        receivable_from_tenant = s['receivable_from_tenant']
+        payable_to_tenant = s['payable_to_tenant']
+        deposit_used = s['deposit_used']
+        deposit_refund = s['deposit_refund']
+        remaining_receivable = s['remaining_receivable']
+        remaining_payable = s['remaining_payable']
+        is_fully_settled = s['is_fully_settled']
+        source = s['source']
+        deposit_settled = s['deposit_settled']
+        deposit_settled_amount = s['deposit_settled_amount']
+        deposit_settled_date = s['deposit_settled_date']
+
+        # All settlement math comes from _compute_settlement() above (unpacked locals) —
+        # the history/whatsapp/return blocks below consume those values directly.
+
+        # Fetch settlement history as real payment rows (so the UI can delete them)
+        cur.execute("""
+            SELECT id, payment_type, billing_month, payment_date, amount, payment_mode
+            FROM rental_core.tenant_payments
+            WHERE tenant_id = %s AND payment_type IN ('SETTLEMENT', 'REFUND')
+            ORDER BY payment_date, id
+        """, (tenant_id,))
+        history = [
+            {
+                "id": h['id'],
+                "payment_type": h['payment_type'],
+                "billing_month": h['billing_month'],
+                "payment_date": str(h['payment_date']),
+                "amount": float(h['amount']),
+                "payment_mode": h['payment_mode'],
+            } for h in cur.fetchall()
+        ]
+
+        # WhatsApp preview message + wa.me link for the settlement modal.
+        # Reflects the (possibly custom-overridden) preview numbers above.
+        def _amt(v):
+            v = float(v or 0.0)
+            return f"{int(v)}" if v == int(v) else f"{v:.2f}"
+
+        _tname = tenant['tenant_name']
+        _addr = tenant['display_address'] or ""
+        _header = _tname + (f" ({_addr})" if _addr else "")
+        _le_fmt = le_date.strftime("%d-%m-%Y")
+        _bm_label = le_date.strftime("%b %Y")
+        _wa_lines = [
+            f"*Final Settlement — {_header}*",
+            f"Lease end: {_le_fmt} | Billing month: {_bm_label}",
+            "",
+            "Last month dues:",
+            f"Rent: ₹{_amt(bhadu)} | Light: ₹{_amt(light)} | Gas: ₹{_amt(gas)} | Maint: ₹{_amt(maint)} | Other: ₹{_amt(common)}",
+            f"Month total: ₹{_amt(month_total)} | Prev balance: ₹{_amt(prev_baki)} | Paid: ₹{_amt(jama)}",
+            f"Gross due: ₹{_amt(gross_baki)}",
+            "",
+            f"Security deposit held: ₹{_amt(deposit_received)} (used ₹{_amt(deposit_used)} for dues)",
+        ]
+        if is_receivable and is_payable:
+            _wa_lines.append(f"*Balance payable by you: ₹{_amt(remaining_receivable)}*")
+            _wa_lines.append(f"*Refundable to you: ₹{_amt(remaining_payable)}*")
+        elif is_receivable:
+            _wa_lines.append(f"*Balance payable by you: ₹{_amt(remaining_receivable)}*")
+        elif is_payable:
+            _wa_lines.append(f"*Refundable to you: ₹{_amt(remaining_payable)}*")
+        else:
+            _wa_lines.append("No dues — settled. Thank you!")
+        _wa_message = "\n".join(_wa_lines)
+        try:
+            _wa_link = wm.wa_link(tenant.get('phone_number'), _wa_message)
+        except Exception:
+            _wa_link = None
+
+        # Nested shape required by the settlement modal (tenant/ledger/settlement/deposit/history)
+        return {
+            "tenant": {
+                "id": tenant_id,
+                "tenant_name": tenant['tenant_name'],
+                "display_address": tenant['display_address'],
+                "phone_number": tenant['phone_number'],
+                "lease_end_date": lease_end_date,
+                "billing_month": billing_month,
+            },
+            "ledger": {
+                "billing_month": billing_month,
+                "billing_month_label": le_date.strftime("%b %Y"),
+                "is_half_month": is_half if 'is_half' in locals() else False,
+                "source": source,
+                "prev_baki": prev_baki,
+                "prev_jama": prev_jama,
+                "bhadu_applied": bhadu,
+                "light_bill": light,
+                "light_actual": light,
+                "gas_bill": gas,
+                "estimated_light": estimated_light,
+                "estimated_gas": estimated_gas,
+                "maintenance_applied": maint,
+                "common_misc_expenses": common,
+                "month_total": month_total,
+                "gross_baki": gross_baki,
+                "jama": jama,
+                "new_baki": gross_baki - jama,
+            },
+            "settlement": {
+                "outstanding": outstanding,
+                "is_receivable": is_receivable,
+                "is_payable": is_payable,
+                "receivable_from_tenant": receivable_from_tenant,
+                "payable_to_tenant": payable_to_tenant,
+                "deposit_used": deposit_used,
+                "deposit_refund": deposit_refund,
+                "remaining_receivable": max(0, remaining_receivable),
+                "remaining_payable": max(0, remaining_payable),
+                "total_settled": total_settled,
+                "total_refunded": total_refunded,
+                "is_fully_settled": is_fully_settled,
+                "deposit_settled": deposit_settled,
+                "deposit_settled_amount": deposit_settled_amount,
+                "deposit_settled_date": deposit_settled_date,
+            },
+            "deposit": {
+                "required": deposit_required,
+                "received": deposit_received,
+                "pending": deposit_pending,
+            },
+            "history": history,
+            "whatsapp_message": _wa_message,
+            "whatsapp_link": _wa_link,
+        }
+    except HTTPException:
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
+        raise
+    except Exception as e:
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        try:
+            cur.close()
+        except:
+            pass
+        try:
+            conn.close()
+        except:
+            pass
+
+class SettlementRecord(BaseModel):
+    lease_end_date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
+    payment_date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
+    payment_mode: str = Field(default="CASH", pattern="^(CASH|UPI|BANK_TRANSFER|CARD|CHEQUE)$")
+    amount: float = Field(..., gt=0)
+    payment_type: str = Field(..., pattern="^(SETTLEMENT|REFUND)$")  # SETTLEMENT=tenant pays receivable, REFUND=owner pays refund
+    note: Optional[str] = None
+    # Optional custom overrides from the Last Month Breakdown inputs. Any value
+    # provided here is PERSISTED to the month's ledger (bhadu direct; light/gas/
+    # maintenance/common via manual-override columns) so the gross stays stable
+    # across reopens. Blank/absent = keep ledger value.
+    custom_bhadu: Optional[float] = Field(default=None, ge=0)
+    custom_light: Optional[float] = Field(default=None, ge=0)
+    custom_gas: Optional[float] = Field(default=None, ge=0)
+    custom_maintenance: Optional[float] = Field(default=None, ge=0)
+    custom_common: Optional[float] = Field(default=None, ge=0)
+
+
+@app.post("/api/tenants/{tenant_id}/settlement")
+async def record_settlement(tenant_id: int, data: SettlementRecord):
+    """
+    Record a final settlement payment.
+    - For receivable (tenant owes): payment_type = 'SETTLEMENT' (tenant pays)
+    - For payable (owner owes): payment_type = 'REFUND' (owner pays tenant)
+    Updates deposit settlement tracking and settlement history.
+    """
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT * FROM rental_core.tenants WHERE id = %s", (tenant_id,))
+        tenant = cur.fetchone()
+        if not tenant:
+            raise HTTPException(status_code=404, detail="Tenant not found")
+
+        le_date = datetime.strptime(data.lease_end_date[:10], "%Y-%m-%d").date()
+        billing_month = le_date.strftime("%Y-%m")
+        payment_date = datetime.strptime(data.payment_date[:10], "%Y-%m-%d").date()
+
+        # Previous month's carry (needed by the customs-persist step below;
+        # all settlement math itself comes from _compute_settlement).
+        _prev_bm = (le_date.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+        cur.execute("SELECT COALESCE(new_baki, 0) AS nb FROM rental_core.monthly_ledgers WHERE tenant_id=%s AND billing_month=%s", (tenant_id, _prev_bm))
+        prev_row = cur.fetchone()
+        prev_nb = float(prev_row['nb']) if prev_row and prev_row['nb'] is not None else 0.0
+        if prev_nb >= 0:
+            prev_baki, prev_jama = prev_nb, 0.0
+        else:
+            prev_baki, prev_jama = 0.0, -prev_nb
+
+        # Persist any custom breakdown overrides to the month's ledger FIRST, so the
+        # recorded gross is stable: reopening the window later shows identical numbers
+        # and the deposit can never be refunded twice off a shifting gross.
+        customs = {}
+        if data.custom_bhadu is not None:
+            customs['bhadu_applied'] = float(data.custom_bhadu)
+        if data.custom_light is not None:
+            customs['light_bill_manual'] = float(data.custom_light)
+        if data.custom_gas is not None:
+            customs['gas_bill_manual'] = float(data.custom_gas)
+        if data.custom_maintenance is not None:
+            customs['maintenance_manual'] = float(data.custom_maintenance)
+        if data.custom_common is not None:
+            customs['common_misc_manual'] = float(data.custom_common)
+        if customs:
+            cur.execute("SELECT id FROM rental_core.monthly_ledgers WHERE tenant_id = %s AND billing_month = %s",
+                        (tenant_id, billing_month))
+            if not cur.fetchone():
+                cur.execute("""
+                    INSERT INTO rental_core.monthly_ledgers
+                        (room_id, tenant_id, billing_month, prev_baki, prev_jama, bhadu_applied,
+                         light_bill, gas_bill, maintenance_applied, common_misc_expenses)
+                    SELECT t.room_id, t.id, %s, %s, %s, 0.00, 0.00, 0.00, 0.00, 0.00
+                    FROM rental_core.tenants t WHERE t.id = %s
+                    ON CONFLICT (tenant_id, billing_month) DO NOTHING
+                """, (billing_month, prev_baki, prev_jama, tenant_id))
+            set_clause = ", ".join(f"{k} = %s" for k in customs)
+            if any(k.endswith('_manual') for k in customs):
+                set_clause += ", manual_override = TRUE"
+            cur.execute(f"UPDATE rental_core.monthly_ledgers SET {set_clause} WHERE tenant_id = %s AND billing_month = %s",
+                        (*customs.values(), tenant_id, billing_month))
+            # Recompute status from stored jama vs new generated month_total
+            cur.execute("""
+                UPDATE rental_core.monthly_ledgers
+                SET payment_status = CASE
+                        WHEN jama >= month_total AND month_total > 0 THEN 'Paid'
+                        WHEN jama > 0 AND month_total <= 0 THEN 'Paid'
+                        WHEN jama > 0 THEN 'Partial'
+                        ELSE 'Unpaid'
+                    END
+                WHERE tenant_id = %s AND billing_month = %s
+            """, (tenant_id, billing_month))
+            _cascade_ledger_chain(cur, tenant_id, billing_month)
+            # Re-read the updated ledger row for settlement math below
+            cur.execute("SELECT * FROM rental_core.monthly_ledgers WHERE tenant_id = %s AND billing_month = %s",
+                        (tenant_id, billing_month))
+            lrow = cur.fetchone()
+
+        # Single source of truth: identical math to the preview (GET), computed AFTER
+        # customs were persisted above — validation can never disagree with display.
+        s = _compute_settlement(cur, tenant_id, le_date, billing_month,
+                                {'bhadu': None, 'light': None, 'gas': None,
+                                 'maintenance': None, 'common': None})
+        tenant = s['tenant']
+        deposit_received = s['deposit_received']
+
+        # Use payment_type from frontend (validated against situation)
+        payment_type = data.payment_type
+
+        # Validate payment_type matches the settlement situation
+        if payment_type == 'SETTLEMENT':
+            # Tenant pays receivable - validate against remaining receivable
+            if data.amount > s['remaining_receivable'] + 0.01:
+                raise HTTPException(status_code=400, detail=f"Amount exceeds remaining receivable (₹{s['remaining_receivable']:,.2f})")
+            is_full_settlement = (data.amount >= s['remaining_receivable'] - 0.01)
+        elif payment_type == 'REFUND':
+            # Owner pays refund - validate against remaining refundable
+            if data.amount > s['remaining_payable'] + 0.01:
+                raise HTTPException(status_code=400, detail=f"Amount exceeds remaining payable (₹{s['remaining_payable']:,.2f})")
+            is_full_settlement = (data.amount >= s['remaining_payable'] - 0.01)
+        else:
+            raise HTTPException(status_code=400, detail="Invalid payment_type. Use SETTLEMENT or REFUND")
+
+        # Insert settlement payment
+        cur.execute("SELECT COALESCE(MAX(batch_id), 0) + 1 AS next_batch FROM rental_core.tenant_payments")
+        batch_id = cur.fetchone()['next_batch']
+
+        cur.execute("""
+            INSERT INTO rental_core.tenant_payments
+            (tenant_id, room_id, billing_month, payment_date, amount, payment_mode, payment_type, note, batch_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;
+        """, (
+            tenant_id,
+            tenant['room_id'],
+            billing_month,
+            payment_date,
+            data.amount,
+            data.payment_mode,
+            payment_type,
+            data.note or f'Final settlement {data.lease_end_date}',
+            batch_id
+        ))
+        payment_id = cur.fetchone()['id']
+
+        # Update tenant deposit settlement tracking
+        settlement_entry = {
+            "payment_id": payment_id,
+            "lease_end_date": data.lease_end_date,
+            "payment_date": data.payment_date,
+            "payment_type": payment_type,
+            "amount": float(data.amount),
+            "payment_mode": data.payment_mode,
+            "note": data.note or f'Final settlement {data.lease_end_date}',
+            "recorded_at": datetime.now().isoformat()
+        }
+
+        cur.execute("SELECT settlement_history FROM rental_core.tenants WHERE id = %s", (tenant_id,))
+        hist_row = cur.fetchone()
+        settlement_history = hist_row['settlement_history'] if hist_row and hist_row['settlement_history'] else []
+        settlement_history.append(settlement_entry)
+
+        # Update deposit_settled flags
+        new_deposit_settled = False
+        new_deposit_settled_amount = float(tenant.get('deposit_settled_amount', 0) or 0)
+        new_deposit_settled_date = tenant.get('deposit_settled_date')
+
+        if payment_type == 'SETTLEMENT':
+            new_deposit_settled_amount += data.amount
+            if is_full_settlement:
+                new_deposit_settled = True
+                new_deposit_settled_date = payment_date
+        elif payment_type == 'REFUND':
+            new_deposit_settled_amount = deposit_received
+            if is_full_settlement:
+                new_deposit_settled = True
+                new_deposit_settled_date = payment_date
+
+        cur.execute("""
+            UPDATE rental_core.tenants
+            SET settlement_history = %s,
+                deposit_settled = %s,
+                deposit_settled_amount = %s,
+                deposit_settled_date = %s,
+                is_active = CASE WHEN %s THEN 'N' ELSE is_active END
+            WHERE id = %s
+        """, (json.dumps(settlement_history), new_deposit_settled, new_deposit_settled_amount, new_deposit_settled_date, is_full_settlement, tenant_id))
+
+        # NOTE: SETTLEMENT and REFUND are final settlement actions - they do NOT update monthly ledger jama
+        # The ledger reflects monthly rent/bills. Settlement is a separate closing action.
+        # No ledger sync needed for settlement payments.
+
+        conn.commit()
+        return {
+            "status": "SUCCESS",
+            "payment_id": payment_id,
+            "payment_type": payment_type,
+            "message": f"Settlement recorded as {payment_type}",
+            "is_full_settlement": is_full_settlement
+        }
+    except HTTPException:
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
+        raise
+    except Exception as e:
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        try:
+            cur.close()
+        except:
+            pass
+        try:
+            conn.close()
+        except:
+            pass
 
 @app.post("/api/tenants")
 def create_tenant(tenant: TenantCreate):
@@ -1077,14 +1977,28 @@ def update_expense(expense_id: int, data: ExpenseUpdate):
         conn.commit()
         return {"status": "SUCCESS", "message": f"Expense #{expense_id} updated."}
     except HTTPException:
-        conn.rollback()
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
         raise
     except Exception as e:
-        conn.rollback()
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
         raise HTTPException(status_code=400, detail=str(e))
     finally:
-        cur.close()
-        conn.close()
+        try:
+            cur.close()
+        except:
+            pass
+        try:
+            conn.close()
+        except:
+            pass
 
 
 @app.delete("/api/expenses/{expense_id}")
@@ -1370,14 +2284,28 @@ def add_payment(payment: PaymentCreate):
         conn.commit()
         return {"status": "SUCCESS", "payment_ids": new_ids, "batch_id": batch_id}
     except HTTPException:
-        conn.rollback()
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
         raise
     except Exception as e:
-        conn.rollback()
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
         raise HTTPException(status_code=400, detail=str(e))
     finally:
-        cur.close()
-        conn.close()
+        try:
+            cur.close()
+        except:
+            pass
+        try:
+            conn.close()
+        except:
+            pass
 
 
 @app.delete("/api/payments/{payment_id}")
@@ -1391,31 +2319,79 @@ def delete_payment(payment_id: int):
         if not row:
             raise HTTPException(status_code=404, detail="Payment not found")
 
-        # Deleting any row of a split payment deletes the whole batch
-        cur.execute("SELECT tenant_id, billing_month FROM rental_core.tenant_payments WHERE batch_id = %s",
-                    (row['batch_id'],))
-        batch_rows = cur.fetchall()
-        cur.execute("DELETE FROM rental_core.tenant_payments WHERE batch_id = %s", (row['batch_id'],))
+        # Deleting any row of a split payment deletes the whole batch.
+        # NOTE: batch_id can be NULL (old/single payments) — then delete just this row.
+        if row['batch_id'] is None:
+            batch_rows = [{"tenant_id": row['tenant_id'], "billing_month": row['billing_month']}]
+            deleted_ids = [payment_id]
+            cur.execute("DELETE FROM rental_core.tenant_payments WHERE id = %s", (payment_id,))
+        else:
+            cur.execute("SELECT id, tenant_id, billing_month FROM rental_core.tenant_payments WHERE batch_id = %s",
+                        (row['batch_id'],))
+            batch_rows = cur.fetchall()
+            deleted_ids = [b['id'] for b in batch_rows]
+            cur.execute("DELETE FROM rental_core.tenant_payments WHERE batch_id = %s", (row['batch_id'],))
         for b in batch_rows:
             _sync_ledger_jama(cur, b['tenant_id'], b['billing_month'])
+
+        # If a SETTLEMENT/REFUND payment was deleted, reopen the settlement bookkeeping:
+        # drop its history entries, recompute settled flags, reactivate tenant if fully reopened.
+        if row['payment_type'] in ('SETTLEMENT', 'REFUND'):
+            tenant_id = row['tenant_id']
+            cur.execute("SELECT settlement_history FROM rental_core.tenants WHERE id = %s", (tenant_id,))
+            hist_row = cur.fetchone()
+            history = hist_row['settlement_history'] if hist_row and hist_row['settlement_history'] else []
+            history = [h for h in history if h.get('payment_id') not in deleted_ids]
+            cur.execute("""
+                SELECT COALESCE(SUM(amount) FILTER (WHERE payment_type = 'SETTLEMENT'), 0) AS settled,
+                       COALESCE(SUM(amount) FILTER (WHERE payment_type = 'REFUND'), 0) AS refunded
+                FROM rental_core.tenant_payments WHERE tenant_id = %s
+            """, (tenant_id,))
+            rem = cur.fetchone()
+            remaining_settled = float(rem['settled'] or 0)
+            remaining_refunded = float(rem['refunded'] or 0)
+            fully_reopened = (remaining_settled <= 0.01 and remaining_refunded <= 0.01)
+            cur.execute("""
+                UPDATE rental_core.tenants
+                SET settlement_history = %s,
+                    deposit_settled = CASE WHEN %s THEN FALSE ELSE deposit_settled END,
+                    deposit_settled_amount = %s,
+                    deposit_settled_date = CASE WHEN %s THEN NULL ELSE deposit_settled_date END,
+                    is_active = CASE WHEN %s THEN 'Y' ELSE is_active END
+                WHERE id = %s
+            """, (json.dumps(history), fully_reopened, remaining_settled, fully_reopened, fully_reopened, tenant_id))
         conn.commit()
         return {"status": "SUCCESS", "deleted_payments": len(batch_rows)}
     except HTTPException:
-        conn.rollback()
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
         raise
     except Exception as e:
-        conn.rollback()
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
         raise HTTPException(status_code=400, detail=str(e))
     finally:
-        cur.close()
-        conn.close()
+        try:
+            cur.close()
+        except:
+            pass
+        try:
+            conn.close()
+        except:
+            pass
 
 
 @app.get("/api/gas-reports/status")
 def get_gas_reports_status():
     """Check if gas report files exist and their last modified times."""
     import os
-    from datetime import datetime
+    from datetime import datetime, timedelta
     
     base_dir = os.path.dirname(os.path.abspath(__file__))
     csv_path = os.path.join(base_dir, "gujarat_gas_report.csv")
@@ -1570,14 +2546,128 @@ def update_ledger(ledger_id: int, data: LedgerUpdate):
             "payment_status": new_status,
         }
     except HTTPException:
-        conn.rollback()
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
         raise
     except Exception as e:
-        conn.rollback()
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
         raise HTTPException(status_code=400, detail=str(e))
     finally:
-        cur.close()
-        conn.close()
+        try:
+            cur.close()
+        except:
+            pass
+        try:
+            conn.close()
+        except:
+            pass
+
+
+class LedgerManualUpdate(BaseModel):
+    light_bill: Optional[float] = Field(default=None, ge=0)
+    gas_bill: Optional[float] = Field(default=None, ge=0)
+    maintenance: Optional[float] = Field(default=None, ge=0)
+    common_misc: Optional[float] = Field(default=None, ge=0)
+    clear: Optional[bool] = False
+
+
+@app.put("/api/ledgers/{ledger_id}/manual")
+def update_ledger_manual(ledger_id: int, data: LedgerManualUpdate):
+    """Save or clear manual bill overrides for a ledger month.
+
+    Set payload: {light_bill?, gas_bill?, maintenance?, common_misc?} — only the
+    provided fields are overwritten; manual_override is set TRUE.
+    Clear payload: {clear: true} — clears the provided fields, or ALL manuals
+    when no field keys are given; manual_override recomputed from remainder.
+    payment_status is recomputed and the ledger chain cascaded, since generated
+    month_total/gross_baki/new_baki shift with the overrides.
+    """
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT tenant_id, billing_month FROM rental_core.monthly_ledgers WHERE id = %s",
+                    (ledger_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Ledger entry not found")
+        tenant_id, billing_month = row['tenant_id'], row['billing_month']
+
+        col_map = {
+            'light_bill': 'light_bill_manual',
+            'gas_bill': 'gas_bill_manual',
+            'maintenance': 'maintenance_manual',
+            'common_misc': 'common_misc_manual',
+        }
+        provided = {k for k in col_map if getattr(data, k) is not None}
+        if data.clear:
+            to_clear = provided if provided else set(col_map)
+            set_clause = ", ".join(f"{col_map[k]} = NULL" for k in to_clear)
+            cur.execute(f"UPDATE rental_core.monthly_ledgers SET {set_clause} WHERE id = %s",
+                        (ledger_id,))
+        else:
+            if not provided:
+                raise HTTPException(status_code=400, detail="No manual values to save")
+            set_clause = ", ".join(f"{col_map[k]} = %s" for k in provided)
+            cur.execute(f"UPDATE rental_core.monthly_ledgers SET {set_clause} WHERE id = %s",
+                        (*[float(getattr(data, k)) for k in provided], ledger_id))
+
+        cur.execute("""
+            UPDATE rental_core.monthly_ledgers
+            SET manual_override = (
+                    light_bill_manual IS NOT NULL OR gas_bill_manual IS NOT NULL
+                    OR maintenance_manual IS NOT NULL OR common_misc_manual IS NOT NULL
+                ),
+                payment_status = CASE
+                    WHEN jama >= month_total AND month_total > 0 THEN 'Paid'
+                    WHEN jama > 0 AND month_total <= 0 THEN 'Paid'
+                    WHEN jama > 0 THEN 'Partial'
+                    ELSE 'Unpaid'
+                END
+            WHERE id = %s
+            RETURNING manual_override, payment_status, month_total, gross_baki, new_baki;
+        """, (ledger_id,))
+        updated = cur.fetchone()
+        _cascade_ledger_chain(cur, tenant_id, billing_month)
+        conn.commit()
+        return {
+            "status": "SUCCESS",
+            "ledger_id": ledger_id,
+            "manual_override": bool(updated['manual_override']),
+            "payment_status": updated['payment_status'],
+            "month_total": float(updated['month_total'] or 0),
+            "gross_baki": float(updated['gross_baki'] or 0),
+            "new_baki": float(updated['new_baki'] or 0),
+        }
+    except HTTPException:
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
+        raise
+    except Exception as e:
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        try:
+            cur.close()
+        except:
+            pass
+        try:
+            conn.close()
+        except:
+            pass
 
 
 # --- 7. ONE-CLICK OPERATIONAL ACTIONS ---
@@ -1710,14 +2800,28 @@ def update_tenant(tenant_id: int, data: TenantUpdate):
         conn.commit()
         return {"status": "SUCCESS", "message": f"Tenant #{tenant_id} updated."}
     except HTTPException:
-        conn.rollback()
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
         raise
     except Exception as e:
-        conn.rollback()
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
         raise HTTPException(status_code=400, detail=str(e))
     finally:
-        cur.close()
-        conn.close()
+        try:
+            cur.close()
+        except:
+            pass
+        try:
+            conn.close()
+        except:
+            pass
 
 @app.post("/api/operations/import-gas-metrics")
 def trigger_gas_import():
@@ -1811,14 +2915,28 @@ def update_template(template_id: int, data: TemplateUpdate):
         conn.commit()
         return {"status": "SUCCESS", "message": f"Template #{template_id} updated."}
     except HTTPException:
-        conn.rollback()
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
         raise
     except Exception as e:
-        conn.rollback()
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
         raise HTTPException(status_code=400, detail=str(e))
     finally:
-        cur.close()
-        conn.close()
+        try:
+            cur.close()
+        except:
+            pass
+        try:
+            conn.close()
+        except:
+            pass
 
 
 @app.delete("/api/templates/{template_id}")
@@ -1883,14 +3001,28 @@ def set_tenant_template(tenant_id: int, template_id: int = Query(None)):
         conn.commit()
         return {"status": "SUCCESS", "tenant_id": tenant_id, "template_id": template_id}
     except HTTPException:
-        conn.rollback()
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
         raise
     except Exception as e:
-        conn.rollback()
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
         raise HTTPException(status_code=400, detail=str(e))
     finally:
-        cur.close()
-        conn.close()
+        try:
+            cur.close()
+        except:
+            pass
+        try:
+            conn.close()
+        except:
+            pass
 
 
 # --- 9c. WHATSAPP MESSAGE RENDER / SEND ---
@@ -2123,7 +3255,7 @@ def set_reminder(data: ReminderSet):
     flipped to SUPERSEDED. A NOTIFY message ("Your New Next Due Date is : ...")
     is queued so the sender dispatches it on its next run.
     """
-    from datetime import datetime as _dt
+    from datetime import datetime, timedelta as _dt
     try:
         # Prepend type tag to note for filtering
         if data.rem_type == 'deposit' and data.note and 'eposit' not in (data.note or ''):
@@ -2225,20 +3357,34 @@ def set_reminder(data: ReminderSet):
             "notify_queued": True,
         }
     except HTTPException:
-        conn.rollback()
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
         raise
     except Exception as e:
-        conn.rollback()
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
         raise HTTPException(status_code=400, detail=str(e))
     finally:
-        cur.close()
-        conn.close()
+        try:
+            cur.close()
+        except:
+            pass
+        try:
+            conn.close()
+        except:
+            pass
 
 
 @app.put("/api/reminders/{reminder_id}")
 def update_reminder(reminder_id: int, data: ReminderSet):
     """Edit the date/amount of an existing reminder (keeps one row)."""
-    from datetime import datetime as _dt
+    from datetime import datetime, timedelta as _dt
     try:
         # Prepend type tag to note for filtering
         if data.rem_type == 'deposit' and data.note and 'eposit' not in (data.note or ''):
@@ -2286,14 +3432,28 @@ def update_reminder(reminder_id: int, data: ReminderSet):
             "notify_queued": True,
         }
     except HTTPException:
-        conn.rollback()
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
         raise
     except Exception as e:
-        conn.rollback()
+        try:
+            if not conn.closed:
+                conn.rollback()
+        except:
+            pass
         raise HTTPException(status_code=400, detail=str(e))
     finally:
-        cur.close()
-        conn.close()
+        try:
+            cur.close()
+        except:
+            pass
+        try:
+            conn.close()
+        except:
+            pass
 
 
 @app.delete("/api/reminders/{reminder_id}")

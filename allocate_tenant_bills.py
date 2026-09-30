@@ -1,9 +1,53 @@
 import csv
 import json
+import math
 import sys
 from datetime import datetime, timedelta
 from decimal import Decimal as _Dec
 from db_config import get_db_connection
+
+# Half rent mapping for first-time bills not exact half (3300→1700 etc.)
+HALF_RENT_MAP = {3300: 1700, 6500: 3400, 7000: 3700, 5000: 2600, 2500: 1350, 3000: 1600, 6400: 3300, 0: 0}
+
+def get_half_rent(base_rent, stored_half=None):
+    """Return half rent: prefer stored value, else mapped, else ceil(base/2) to nearest 100."""
+    if stored_half is not None:
+        try:
+            v = float(stored_half)
+            if v > 0:
+                return v
+        except:
+            pass
+    try:
+        br = int(float(base_rent))
+        if br in HALF_RENT_MAP:
+            return float(HALF_RENT_MAP[br])
+    except:
+        pass
+    try:
+        return float(math.ceil(float(base_rent) / 2 / 100) * 100)
+    except:
+        return float(base_rent) / 2
+
+def is_half_month(lease_start, lease_end, billing_month):
+    """True if billing_month is prorated: start after 15th OR end 1st-15th."""
+    try:
+        bm_year, bm_mon = map(int, billing_month.split('-'))
+        if lease_start:
+            ls = lease_start
+            if isinstance(ls, str):
+                ls = datetime.strptime(ls, '%Y-%m-%d').date() if len(ls) >= 10 else None
+            if ls and ls.year == bm_year and ls.month == bm_mon and ls.day >= 16:
+                return True
+        if lease_end:
+            le = lease_end
+            if isinstance(le, str):
+                le = datetime.strptime(le, '%Y-%m-%d').date() if len(le) >= 10 else None
+            if le and le.year == bm_year and le.month == bm_mon and 1 <= le.day <= 15:
+                return True
+    except:
+        return False
+    return False
 
 
 # Get billing month in YYYY-MM format (override with --month YYYY-MM).
@@ -43,12 +87,18 @@ try:
             t.is_active,
             t.base_rent_applied,
             t.maintenance_applied,
+            t.half_rent_applied,
+            t.lease_start_date,
+            t.lease_end_date,
             r.id AS room_id,
             r.flat_number,
             r.master_id,
             r.display_address,
+            r.half_rent AS room_half_rent,
             pm.plot_number,
-            pm.default_maintenance_fee
+            pm.default_base_rent,
+            pm.default_maintenance_fee,
+            pm.default_half_rent
         FROM rental_core.tenants t
         JOIN rental_core.rooms r ON t.room_id = r.id
         JOIN rental_core.property_masters pm ON r.master_id = pm.id
@@ -69,14 +119,65 @@ try:
     report = {"total": 0, "success": 0, "failures": []}
 
     for (tenant_pk, tenant_name, phone_number, is_active, base_rent_applied, 
-         tenant_maintenance_applied, room_id, flat_number, master_id, 
-         display_address, plot_number, default_maintenance_fee) in tenants:
+         tenant_maintenance_applied, half_rent_applied, lease_start_date, lease_end_date,
+         room_id, flat_number, master_id, 
+         display_address, room_half_rent, plot_number, default_base_rent, default_maintenance_fee, default_half_rent) in tenants:
 
         report["total"] += 1
+        # Skip months outside lease period — only for future months beyond lease (postpaid)
+        # For pre-lease (billing_month < lease_start), do NOT delete existing June for July-start tenants
+        # — preserve historical June per ledger correction file (122 rows Jun/Jul/Aug). Only skip creation if no ledger exists.
+        # Keep delete only for post-lease (billing_month > lease_end) to avoid Aug ledger for Sep-ended tenancy.
+        try:
+            _ls_ym = None
+            if lease_start_date:
+                if hasattr(lease_start_date, 'strftime'):
+                    _ls_ym = lease_start_date.strftime('%Y-%m')
+                else:
+                    _ls_ym = str(lease_start_date)[:7]
+            _le_ym = None
+            if lease_end_date:
+                if hasattr(lease_end_date, 'strftime'):
+                    _le_ym = lease_end_date.strftime('%Y-%m')
+                else:
+                    _le_ym = str(lease_end_date)[:7]
+            if _ls_ym and billing_month < _ls_ym:
+                # Check if ledger already exists for this month (from correction file) — keep it, don't delete
+                cursor.execute("SELECT 1 FROM rental_core.monthly_ledgers WHERE tenant_id=%s AND billing_month=%s", (tenant_pk, billing_month))
+                if not cursor.fetchone():
+                    # No ledger yet and before lease — skip creation (don't create June for Aug-start like Mukesh 35/301)
+                    # But don't delete existing June for July-start tenants that already have June (preserve file data)
+                    report["success"] += 1
+                    continue
+                # If ledger exists (e.g., June for July-start from file), fall through to normal update (keep it)
+            if _le_ym and billing_month > _le_ym:
+                cursor.execute("DELETE FROM rental_core.monthly_ledgers WHERE tenant_id=%s AND billing_month=%s", (tenant_pk, billing_month))
+                print(f"Skipping {tenant_name} {display_address} for {billing_month} > lease_end {_le_ym} - deleted")
+                report["success"] += 1
+                continue
+        except Exception as _e:
+            print(f"Lease check error for {tenant_name}: {_e}")
+            pass
         cursor.execute("SAVEPOINT sp_tenant")
         try:
             # 2. Fixed maintenance per unit - added every month
             fixed_maintenance = tenant_maintenance_applied if tenant_maintenance_applied > 0 else default_maintenance_fee
+
+            # 2a. Determine effective Bhadu (rent) for this billing_month — half rent if mid-month start/end
+            # Fallback for base 0 (data bug): use property default_base_rent
+            try:
+                _base_val = float(base_rent_applied) if base_rent_applied is not None else 0
+            except:
+                _base_val = 0
+            effective_base = base_rent_applied if _base_val > 0 else (default_base_rent if default_base_rent is not None else base_rent_applied)
+            # Priority for half rent value: tenant.half_rent_applied -> rooms.half_rent -> property.default_half_rent -> computed mapping
+            half_rent_val = half_rent_applied or room_half_rent or default_half_rent
+            # If half value is still None/0 but base has mapping, get_half_rent will compute from effective_base
+            half_rent_computed = _Dec(str(get_half_rent(effective_base, half_rent_val)))
+            if is_half_month(lease_start_date, lease_end_date, billing_month):
+                bhadu_for_month = half_rent_computed
+            else:
+                bhadu_for_month = _Dec(str(effective_base))
 
             # 2b. Shared misc expenses per property (split among active tenants), OWNER expenses excluded
             if master_id not in property_maintenance_cache:
@@ -149,16 +250,17 @@ try:
                 (tenant_pk, billing_month)
             )
             jama_row = cursor.fetchone()
-            current_jama = jama_row[0] if jama_row else 0.00
+            current_jama = _Dec(jama_row[0]) if jama_row and jama_row[0] is not None else _Dec(0.00)
 
             # 4. Get room-specific direct utility bills using metrics joins
+            # July 2026 torrent amounts are mostly 0 (scrape bug) but last_bill_amt holds correct bill (~588 for 53/401). Fallback to last_bill_amt when amount is 0.
             cursor.execute(
                 """
                 SELECT 
                     COALESCE(SUM(CASE 
                         WHEN tbm.bill_type = 'NOTICE' 
-                            THEN GREATEST(tbm.amount - COALESCE(prev.amount, 0.00), 0.00)
-                        ELSE tbm.amount END), 0.00),
+                            THEN GREATEST(COALESCE(NULLIF(tbm.amount,0), tbm.last_bill_amt, 0) - COALESCE(NULLIF(prev.amount,0), prev.last_bill_amt, 0), 0.00)
+                        ELSE COALESCE(NULLIF(tbm.amount,0), tbm.last_bill_amt, 0) END), 0.00),
                     COALESCE(BOOL_OR(tbm.bill_type = 'NOTICE'), FALSE)
                 FROM rental_core.torrent_bill_master tbm
                 JOIN rental_core.utility_metrics um ON tbm.service_number = um.service_number
@@ -185,8 +287,8 @@ try:
             gas_bill = cursor.fetchone()[0]
 
             # 5. Calculate derived fields
-            # Month Total = Bhadu + Light Bill + Gas Bill + Maintenance + Misc Expenses
-            month_total = base_rent_applied + light_bill + gas_bill + fixed_maintenance + common_misc_expenses
+            # Month Total = Bhadu (prorated half if mid-month start/end) + Light Bill + Gas Bill + Maintenance + Misc Expenses
+            month_total = bhadu_for_month + light_bill + gas_bill + fixed_maintenance + common_misc_expenses
             
             # Gross Baki = Prev Baki - Prev Jama + Month Total
             gross_baki = prev_baki - prev_jama + month_total
@@ -197,28 +299,34 @@ try:
             # For CSV - maintenance value (fixed per-unit monthly maintenance)
             maintenance_for_csv = fixed_maintenance
 
-            # 6. UPSERT into monthly_ledgers
+            # 6. UPSERT into monthly_ledgers — respect manual overrides
+            # Actual utility bills go into *_actual columns; effective columns (light_bill etc.) are only overwritten if no manual override exists.
             cursor.execute(
                 """
                 INSERT INTO rental_core.monthly_ledgers (
                     room_id, tenant_id, billing_month, prev_baki, prev_jama, bhadu_applied, 
-                    light_bill, light_bill_type, gas_bill, maintenance_applied, common_misc_expenses
+                    light_bill, light_bill_actual, light_bill_type, gas_bill, gas_bill_actual, maintenance_applied, maintenance_actual, common_misc_expenses, common_misc_actual
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 ) ON CONFLICT (tenant_id, billing_month) DO UPDATE SET
                     room_id = EXCLUDED.room_id,
                     prev_baki = EXCLUDED.prev_baki,
                     prev_jama = EXCLUDED.prev_jama,
                     bhadu_applied = EXCLUDED.bhadu_applied,
-                    light_bill = EXCLUDED.light_bill,
-                    light_bill_type = EXCLUDED.light_bill_type,
-                    gas_bill = EXCLUDED.gas_bill,
-                    maintenance_applied = EXCLUDED.maintenance_applied,
-                    common_misc_expenses = EXCLUDED.common_misc_expenses
+                    light_bill_actual = EXCLUDED.light_bill,
+                    gas_bill_actual = EXCLUDED.gas_bill,
+                    maintenance_actual = EXCLUDED.maintenance_applied,
+                    common_misc_actual = EXCLUDED.common_misc_expenses,
+                    light_bill = CASE WHEN monthly_ledgers.light_bill_manual IS NOT NULL THEN monthly_ledgers.light_bill ELSE EXCLUDED.light_bill END,
+                    light_bill_type = CASE WHEN monthly_ledgers.light_bill_manual IS NOT NULL THEN monthly_ledgers.light_bill_type ELSE EXCLUDED.light_bill_type END,
+                    gas_bill = CASE WHEN monthly_ledgers.gas_bill_manual IS NOT NULL THEN monthly_ledgers.gas_bill ELSE EXCLUDED.gas_bill END,
+                    maintenance_applied = CASE WHEN monthly_ledgers.maintenance_manual IS NOT NULL THEN monthly_ledgers.maintenance_applied ELSE EXCLUDED.maintenance_applied END,
+                    common_misc_expenses = CASE WHEN monthly_ledgers.common_misc_manual IS NOT NULL THEN monthly_ledgers.common_misc_expenses ELSE EXCLUDED.common_misc_expenses END,
+                    manual_override = CASE WHEN monthly_ledgers.light_bill_manual IS NOT NULL OR monthly_ledgers.gas_bill_manual IS NOT NULL OR monthly_ledgers.maintenance_manual IS NOT NULL OR monthly_ledgers.common_misc_manual IS NOT NULL THEN true ELSE false END
                 """,
                 (
-                    room_id, tenant_pk, billing_month, prev_baki, prev_jama, base_rent_applied,
-                    light_bill, light_bill_type, gas_bill, fixed_maintenance, common_misc_expenses
+                    room_id, tenant_pk, billing_month, prev_baki, prev_jama, bhadu_for_month,
+                    light_bill, light_bill, light_bill_type, gas_bill, gas_bill, fixed_maintenance, fixed_maintenance, common_misc_expenses, common_misc_expenses
                 )
             )
 
@@ -237,7 +345,7 @@ try:
                 display_address,
                 f"{prev_baki:.2f}",
                 f"{prev_jama:.2f}",
-                f"{base_rent_applied:.2f}",
+                f"{bhadu_for_month:.2f}",
                 f"{light_bill:.2f}",
                 f"{gas_bill:.2f}",
                 f"{maintenance_for_csv:.2f}",
@@ -248,6 +356,9 @@ try:
                 f"{new_baki:.2f}"
             ])
         except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            print(f"❌ Error for tenant {tenant_name} ({flat_number}): {e}\n{tb}")
             cursor.execute("ROLLBACK TO SAVEPOINT sp_tenant")
             report["failures"].append({"tenant": tenant_name, "flat": flat_number, "reason": str(e)})
 

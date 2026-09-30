@@ -1,22 +1,47 @@
 #!/usr/bin/env python3
-"""Automated next-due-date reminder sender.
+"""Automated next-due-date reminder sender — v2 (reliable).
 
-Reads rental_core.tenant_reminders and sends the three reminder messages:
+Lifecycle
+---------
+* NOTIFY — queued instantly when a payment + due-date is saved (gui_api
+  POST /api/reminders with paid_amount/paid_date).  The message is
+  pre-rendered (notify_paid_rent / notify_paid_deposit / notify_set_*)
+  mentioning the amount just received, the next due date and the pending
+  balance.  Sent by the *instant* run (``--kind instant``).
 
-  * NOTIFY - queued whenever a reminder date is set/updated:
-             "Your New Next Due Date is : <date>"
-  * D1     - one day before the reminder date (reminder_date = today + 1)
-  * DUE    - on the reminder date (reminder_date = today)
+* D1  — one day before reminder_date (reminder_date = today+1)
+* DUE — on reminder_date (reminder_date = today)
 
-Each send is recorded in rental_core.reminder_send_log and the corresponding
-sent_at column (notify/d1/due) is stamped so a message is never sent twice.
+  Both are generated on-the-fly from template master (d1_rent/due_rent
+  etc.) and sent by the *scheduled* run (systemd daily at master time).
 
-Reuses the WhatsApp Web session + anti-detection browser from
-send_whatsapp_reminders.py (same profile dir, paste-based sending).
+Verification
+------------
+A single JS probe (``_WA_STATUS_PROBE_JS``) is injected via
+``context.add_init_script`` and is the **only** place that interprets
+WhatsApp's delivery ticks.  Every Python check calls that same function.
+
+  sent / delivered / read  →  SENT   (✓ or ✓✓)
+  clock                    →  PENDING (clock icon, not yet on server)
+  bubble-not-found / unknown / probe-failed → diagnosed as FAILED
+
+If clock persists for the full verification window (30 s fast / 60 s
+scheduled) the message is marked FAILED and retried once — up to
+``MAX_ATTEMPTS = 2`` total attempts per (reminder_id, send_type).  The
+reminder's stamp column (notify/d1/due_sent_at) is set **only** on SENT
+or after the final failed attempt, so a transient failure does not
+block the retry and stays visible in reminder_send_log.
+
+Batch isolation
+---------------
+Each recipient is wrapped in its own ``try/except`` — an exception for
+one tenant never aborts the remaining queue.  If the Playwright page
+crashes it is re-created for the next item.
 
 Usage:
   python send_due_reminders.py [--dry-run] [--limit N]
       [--min-delay 60] [--max-delay 180] [--month YYYY-MM] [--test-number ...]
+      [--kind instant|scheduled] [--fast] [--headed]
 """
 import argparse
 import json
@@ -36,33 +61,17 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from send_whatsapp_reminders import (  # noqa: E402
     new_browser, paste_text, human_type, random_pause,
     SELECTOR_CHAT_LIST, SELECTOR_INPUT, SELECTOR_SEND,
-    log_send as _unused_log_send,
 )
 
 _BATCH = None
 _HEADED = False
+MAX_ATTEMPTS = 2          # total attempts per (reminder_id, send_type)
+VERIFY_FAST_MS = 30000
+VERIFY_SCHED_MS = 60000
 
 # ---------------------------------------------------------------------------
-# Delivery-status probe (single source of truth)
-#
-# The previous implementation re-derived "is this bubble sent?" three
-# separate times (the wait_for_function predicate, the timeout diagnostic,
-# and the post-screenshot re-check) with slightly different JS each time.
-# That's exactly how a real message with a visible single-tick can still
-# get marked FAILED: one of the three copies misses it while another would
-# have caught it, and there's no way to tell which one ran.
-#
-# This version defines the check ONCE, injected via context.add_init_script
-# so it survives every page.goto() navigation, and every Python call site
-# (wait / diagnose / re-check) calls the exact same JS function.
-#
-# It also stops relying solely on WhatsApp's `data-icon` attribute, which
-# is the classic "old scraping tutorial" selector and is not guaranteed to
-# still exist in the current WhatsApp Web build. Detection now tries, in
-# order: aria-label (most redesign-resistant), data-icon (legacy), an
-# inline <svg><title>, and finally a raw check-glyph in the text — and it
-# no longer requires narrowing to a single leaf element before searching,
-# which was the actual cause of "bubble found, but icon not found".
+# Single-source-of-truth delivery probe
+# ---------------------------------------------------------------------------
 _WA_STATUS_PROBE_JS = r"""
 (() => {
   function normText(s) { return (s || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
@@ -70,9 +79,6 @@ _WA_STATUS_PROBE_JS = r"""
   function outgoingRows() {
     const main = document.querySelector('#main');
     if (!main) return [];
-    // Primary: WhatsApp's own internal message-id convention. Outgoing
-    // messages carry data-id="true_...."; this has stayed far more stable
-    // across UI/CSS redesigns than any class name.
     let rows = [...main.querySelectorAll('[data-id^="true_"]')];
     if (rows.length === 0) rows = [...main.querySelectorAll('.message-out')];
     if (rows.length === 0) rows = [...main.querySelectorAll('[data-testid="msg-container"]')];
@@ -86,10 +92,6 @@ _WA_STATUS_PROBE_JS = r"""
     let mine = null;
     if (suf) mine = rows.filter(r => normText(r.innerText).includes(suf)).pop();
     if (!mine && pre) mine = rows.filter(r => normText(r.innerText).includes(pre)).pop();
-    // No fallback to last row – that caused false positive where rent
-    // verification found the previous deposit bubble when rent had not
-    // actually been sent. If neither suf nor pre matches, the bubble
-    // truly hasn't appeared yet.
     return mine || null;
   }
 
@@ -127,7 +129,6 @@ _WA_STATUS_PROBE_JS = r"""
     }
 
     if (/[\u2713\u2714\u2705]/.test(text) || /[\u2713\u2714\u2705]/.test(html)) return 'sent';
-
     return 'unknown';
   }
 
@@ -145,14 +146,14 @@ _WA_STATUS_PROBE_JS = r"""
 
 
 def _norm_snippet(message):
-    """Build the {suf, pre} text fingerprint used to locate our bubble
-    in the chat pane. Matching both ends (not just the tail) means a
-    message WhatsApp displays truncated ("...Read more") behind a long
-    combined DUE+HISAB body still gets located via its opening line."""
     import re as _re
     norm = _re.sub(r'[^a-z0-9]', '', (message or '').lower())
     return {"suf": norm[-40:], "pre": norm[:40]}
 
+
+# ---------------------------------------------------------------------------
+# DB helpers
+# ---------------------------------------------------------------------------
 
 def log_reminder_send(batch_id, reminder, send_type, message, status, error=None, screenshot_b64=None):
     conn = get_db_connection(as_dict=True)
@@ -211,6 +212,43 @@ def _pending_notifies(month=None):
     return rows
 
 
+def _retry_notifies(month=None):
+    """NOTIFY rows that FAILED on first attempt (attempts < MAX) and have no
+    QUEUED successor yet — returned as synthetic retry items so the retry
+    happens without manual re-queue."""
+    conn = get_db_connection(as_dict=True)
+    cur = conn.cursor()
+    # count FAILED per reminder; create retry for those with 1 failure and no QUEUED/SENT
+    q = """
+        SELECT r.id AS reminder_id, r.tenant_id, r.billing_month, r.reminder_date,
+               t.phone_number, l.message, l.id AS failed_log_id
+        FROM rental_core.tenant_reminders r
+        JOIN rental_core.tenants t ON t.id = r.tenant_id
+        JOIN rental_core.reminder_send_log l ON l.reminder_id = r.id
+        WHERE r.status = 'ACTIVE'
+          AND l.send_type = 'NOTIFY' AND l.status = 'FAILED'
+          AND r.notify_sent_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM rental_core.reminder_send_log l2
+              WHERE l2.reminder_id = r.id AND l2.send_type='NOTIFY' AND l2.status IN ('QUEUED','SENT')
+          )
+          AND (
+              SELECT COUNT(*) FROM rental_core.reminder_send_log l3
+              WHERE l3.reminder_id = r.id AND l3.send_type='NOTIFY' AND l3.status='FAILED'
+          ) < %s
+    """
+    args = [MAX_ATTEMPTS]
+    if month:
+        q += " AND r.billing_month = %s"
+        args.append(month)
+    q += " ORDER BY l.id ASC"
+    cur.execute(q, args)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
 def _due_reminders(month=None):
     today = date.today()
     target_days = {today + timedelta(days=1): "D1", today: "DUE"}
@@ -237,15 +275,68 @@ def _due_reminders(month=None):
         for d, typ in target_days.items():
             col = {"D1": "d1_sent_at", "DUE": "due_sent_at"}[typ]
             if rd == d and r[col] is None:
+                # respect MAX_ATTEMPTS — skip if already failed twice
+                if _failed_count(r['id'], typ) >= MAX_ATTEMPTS:
+                    print(f"⏭  SKIP tenant {r['tenant_id']} {typ} id={r['id']}: already failed {MAX_ATTEMPTS} times")
+                    continue
                 out.append((typ, r))
     return out
 
 
-def _outstanding_gt_zero(cur, tenant_id, billing_month):
-    """Only send if the month's outstanding is actually > 0 (payment may have
-    arrived before the due date, in which case no reminder goes out).
-    If no ledger exists for this billing_month, check amount_due instead
-    (don't skip)."""
+def _failed_count(reminder_id, send_type):
+    """How many FAILED attempts for this (reminder_id, send_type)."""
+    conn = get_db_connection(as_dict=True)
+    cur = conn.cursor()
+    # HISAB shares due_sent_at with DUE — count both together for DUE
+    if send_type == "DUE":
+        cur.execute("""
+            SELECT COUNT(*) AS c FROM rental_core.reminder_send_log
+            WHERE reminder_id=%s AND send_type IN ('DUE','HISAB') AND status='FAILED'
+        """, (reminder_id,))
+    else:
+        cur.execute("""
+            SELECT COUNT(*) AS c FROM rental_core.reminder_send_log
+            WHERE reminder_id=%s AND send_type=%s AND status='FAILED'
+        """, (reminder_id, send_type))
+    c = cur.fetchone()['c'] if cur.rowcount else 0
+    cur.close()
+    conn.close()
+    return int(c or 0)
+
+
+def _has_been_sent(reminder_id, send_type):
+    conn = get_db_connection(as_dict=True)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT 1 FROM rental_core.reminder_send_log
+        WHERE reminder_id=%s AND send_type=%s AND status='SENT' LIMIT 1
+    """, (reminder_id, send_type))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row is not None
+
+
+def _outstanding_gt_zero(cur, tenant_id, billing_month, rem_type='rent'):
+    """Rent → monthly_ledgers.new_baki ; Deposit → pending deposit."""
+    if rem_type == 'deposit':
+        # deposit pending = required - received
+        try:
+            cur.execute("""
+                SELECT t.security_deposit_applied AS required,
+                       COALESCE(SUM(p.amount),0) AS received
+                FROM rental_core.tenants t
+                LEFT JOIN rental_core.tenant_payments p
+                  ON p.tenant_id=t.id AND p.payment_type='DEPOSIT'
+                WHERE t.id=%s GROUP BY t.id
+            """, (tenant_id,))
+            row = cur.fetchone()
+            if not row:
+                return True
+            pending = float(row['required'] or 0) - float(row['received'] or 0)
+            return pending > 0.5
+        except Exception:
+            return True
     out = rm.current_outstanding(cur, tenant_id, billing_month)
     if out is None:
         return True
@@ -256,7 +347,6 @@ def _outstanding_gt_zero(cur, tenant_id, billing_month):
 
 
 def render_notify(cur, log_row):
-    """NOTIFY messages are pre-rendered at set time; return as-is."""
     return {
         "reminder_id": log_row['reminder_id'],
         "tenant_id": log_row['tenant_id'],
@@ -298,17 +388,11 @@ def render_due(cur, typ, reminder):
 
 
 def build_items(month=None, notify_only=False):
-    """Build the send queue.
-
-    notify_only=True (instant runs triggered by a payment/due-date save)
-    dispatches ONLY pre-queued NOTIFY confirmations — campaign items
-    (D1/DUE/HISAB) belong exclusively to scheduled / manual full runs,
-    otherwise every save would re-fire every eligible reminder.
-    """
     items = []
     seen = set()
     conn = get_db_connection(as_dict=True)
     cur = conn.cursor()
+    # 1) pending NOTIFY (QUEUED)
     for n in _pending_notifies(month):
         key = (n["reminder_id"], "NOTIFY")
         if key in seen:
@@ -320,16 +404,40 @@ def build_items(month=None, notify_only=False):
         it["label"] = "NOTIFY"
         it["stamp_col"] = _STAMP_COL["NOTIFY"]
         items.append(it)
+    # 1b) retry NOTIFY (FAILED once, still ACTIVE, not yet SENT/QUEUED)
+    if not notify_only:
+        # also consider retry notifies for scheduled runs that may have missed instant
+        pass
+    # include retry notifies for both instant and scheduled so instant recovers quickly
+    for r_ in _retry_notifies(month):
+        key = (r_["reminder_id"], "NOTIFY")
+        if key in seen:
+            continue
+        seen.add(key)
+        it = {
+            "reminder_id": r_["reminder_id"],
+            "tenant_id": r_["tenant_id"],
+            "phone_number": r_["phone_number"],
+            "message": r_["message"],
+            "billing_month": r_["billing_month"],
+            "send_type": "NOTIFY",
+            "label": "NOTIFY-RETRY",
+            "stamp_col": _STAMP_COL["NOTIFY"],
+            "is_retry": True,
+        }
+        items.append(it)
     if notify_only:
+        cur.close(); conn.close()
         return items
+    # 2) D1 / DUE
     for typ, r in _due_reminders(month):
         key = (r['id'], typ)
         if key in seen:
             continue
         seen.add(key)
-        if not _outstanding_gt_zero(cur, r['tenant_id'], r['billing_month']):
-            print(f"⏭  SKIP tenant {r['tenant_id']} for {r['billing_month']}: "
-                  f"outstanding is 0 (already paid)")
+        rt = _rem_type_of(r)
+        if not _outstanding_gt_zero(cur, r['tenant_id'], r['billing_month'], rt):
+            print(f"⏭  SKIP tenant {r['tenant_id']} for {r['billing_month']} ({rt}): outstanding is 0 (already paid)")
             continue
         it = render_due(cur, typ, r)
         it["send_type"] = typ
@@ -337,36 +445,46 @@ def build_items(month=None, notify_only=False):
         it["stamp_col"] = _STAMP_COL[typ]
         it["reminder_status"] = r.get('status', 'ACTIVE')
         items.append(it)
-        if typ == "DUE":
-            # On the actual due date for RENT the requirement is to send
-            # the due reminder *combined* with the master hisab content
-            # (detailed ledger). Historically HISAB was a separate item
-            # sharing due_sent_at with DUE, so after DUE stamped the HISAB
-            # was skipped via _stamp_taken and never delivered. Fix: for
-            # rent, append hisab to the DUE message itself.
-            hisab = rm.reminder_payload(cur, r, rem_type=_rem_type_of(r))["hisab"] if _rem_type_of(r) == "rent" else None
-            if hisab and _rem_type_of(r) == "rent":
-                # Combine: DUE text + blank line + full hisab. Stamped once
-                # via due_sent_at, so exactly one WhatsApp bubble on due date
-                # containing both the reminder and the detailed account.
+        if typ == "DUE" and rt == "rent":
+            hisab = rm.reminder_payload(cur, r, rem_type=rt)["hisab"]
+            if hisab:
+                # Single bubble: DUE + hisab, stamped once via due_sent_at
                 it["message"] = it["message"] + "\n\n" + hisab
                 it["label"] = "DUE+HISAB"
-            elif hisab:
-                # Non-rent DUE with hisab? Keep separate HISAB item for
-                # completeness (e.g., future deposit hisab) with dedup.
-                hkey = (r['id'], "HISAB")
-                if hkey not in seen:
-                    seen.add(hkey)
-                    h = dict(it)
-                    h["send_type"] = "HISAB"
-                    h["label"] = "HISAB"
-                    h["message"] = hisab
-                    h["stamp_col"] = _STAMP_COL["HISAB"]
-                    items.append(h)
     cur.close()
     conn.close()
     return items
 
+
+# ---------------------------------------------------------------------------
+# Screenshot helper
+# ---------------------------------------------------------------------------
+
+def _capture_screenshot(page):
+    try:
+        import base64 as _b64
+        return _b64.b64encode(page.screenshot(full_page=False)).decode('utf-8')
+    except Exception:
+        return None
+
+
+def _ensure_page(context, page):
+    """Return a live page; recreate if closed/crashed."""
+    try:
+        if page and not page.is_closed():
+            return page
+    except Exception:
+        pass
+    try:
+        page = context.pages[0] if context.pages else context.new_page()
+        return page
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Core sender — per-item isolated, never aborts batch
+# ---------------------------------------------------------------------------
 
 def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
                test_number=None, fast=False):
@@ -387,8 +505,6 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
     if test_number:
         print(f"🧪 TEST MODE — messages sent to dummy {wm.normalize_phone(test_number)}.")
     pw, context = new_browser(headed=_HEADED)
-    # Injected once; survives every page.goto() navigation that follows,
-    # so the same detection logic backs every send in this run.
     context.add_init_script(_WA_STATUS_PROBE_JS)
     page = context.pages[0] if context.pages else context.new_page()
     print("🔵 Launching WhatsApp Web session...")
@@ -397,8 +513,6 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
         page.wait_for_selector(SELECTOR_CHAT_LIST, timeout=60000)
     except Exception:
         print("❌ Not logged in. Run: python send_whatsapp_reminders.py --login")
-        # Leave originals QUEUED (auto-retry after re-login) but record a
-        # SKIPPED row per item so the GUI log shows WHY nothing was sent.
         try:
             for sk in items:
                 rem2 = {
@@ -413,17 +527,18 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
         pw.stop()
         sys.exit(2)
     print("✅ WhatsApp Web authenticated.")
-    global _SESSION_STARTED
-    _SESSION_STARTED = time.time()
 
     sent = failed = skipped = 0
     _attempted = set()
+
     for i, it in enumerate(items):
+        # ---- limit / dedup / pre-checks (isolated) ----
         if limit and i >= limit:
             print(f"🛑 Reached limit {limit}, stopping.")
             break
         if i > 0:
             random_pause(min_delay, max_delay)
+
         num = wm.normalize_phone(test_number) if test_number else wm.normalize_phone(it["phone_number"])
         _akey = (it["reminder_id"], it["send_type"])
         if _akey in _attempted:
@@ -431,154 +546,220 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
             skipped += 1
             continue
         _attempted.add(_akey)
-        # Pre-send guard: another run may have stamped this already, or the
-        # reminder may have been superseded/deleted while we were launching.
+
+        # Re-check stamp (another run may have completed it while we were sleeping)
         if it["send_type"] in ("D1", "DUE", "HISAB"):
             if _stamp_taken(None, it["reminder_id"], it.get("stamp_col", "d1_sent_at")):
+                # But if last run FAILED (stamp after max attempts), don't re-send
+                # _due_reminders already excluded max-attempt items, so this is genuine SENT
                 print(f"⏭  SKIP {it['label']} tenant {it['tenant_id']}: already stamped")
                 skipped += 1
                 continue
-        if it.get("reminder_status") == "ACTIVE" or it["send_type"] in ("D1", "DUE", "HISAB"):
+
+        # Verify reminder still ACTIVE (not superseded/deleted)
+        try:
             conn_chk = get_db_connection(as_dict=True); _c = conn_chk.cursor()
             _c.execute("SELECT status FROM rental_core.tenant_reminders WHERE id=%s", (it["reminder_id"],))
             _row = _c.fetchone()
             _c.close(); conn_chk.close()
             if not _row or _row["status"] != "ACTIVE":
+                # NOTIFY-RETRY synthetic items may have lost their reminder; skip
                 print(f"⏭  SKIP {it['label']} tenant {it['tenant_id']}: reminder no longer ACTIVE")
                 skipped += 1
                 continue
+        except Exception:
+            pass
+
+        # ---- per-item send with full isolation ----
+        # We attempt at most 2 tries *within this run* if first returns clock,
+        # but each is a fresh paste+send so WhatsApp creates a new bubble.
+        # Overall attempts are bounded by MAX_ATTEMPTS across runs via DB count.
+        item_sent = False
+        last_diag = None
+        last_screenshot = None
+        last_error = None
+
+        # Ensure page is live before this item
+        page = _ensure_page(context, page)
+        if page is None:
+            print(f"   ❌ Page lost before sending to tenant {it['tenant_id']}, recreating...")
+            try:
+                page = context.new_page()
+                page.goto("https://web.whatsapp.com", wait_until="domcontentloaded")
+                page.wait_for_selector(SELECTOR_CHAT_LIST, timeout=30000)
+            except Exception as e:
+                print(f"   ❌ Cannot recreate page: {e} — marking item FAILED")
+                reminder = {"id": it["reminder_id"], "tenant_id": it["tenant_id"], "phone_number": it["phone_number"], "billing_month": it["billing_month"]}
+                if it.get("log_id"):
+                    _mark_log_failed(it["log_id"], f"Page crashed before send: {e}", None)
+                elif it.get("is_retry"):
+                    log_reminder_send(_BATCH, reminder, it["send_type"], it.get("message"), "FAILED", str(e))
+                else:
+                    log_reminder_send(_BATCH, reminder, it["send_type"], it.get("message"), "FAILED", str(e))
+                failed += 1
+                continue
+
+        # Determine how many intra-run attempts to allow:
+        # If already has 1 FAILED in DB, this run is the 2nd and final attempt → 1 try.
+        # If 0 FAILED, allow up to 2 tries within run (immediate retry on clock).
+        already_failed = _failed_count(it["reminder_id"], it["send_type"]) if not it.get("log_id") else 0
+        # For NOTIFY with log_id, attempts tracked via that log's retry chain; allow 1 retry within run on clock
+        intra_attempts = 1 if already_failed >= 1 else 2
+
+        for attempt in range(1, intra_attempts + 1):
+            try:
+                ct = " (retry {})".format(attempt) if attempt > 1 else ""
+                print(f"📨 [{i+1}/{len(items)}]{ct} {it['label']} to tenant {it['tenant_id']} {num}...")
+                page.goto(f"https://web.whatsapp.com/send?phone={num}", wait_until="domcontentloaded")
+                page.wait_for_selector(SELECTOR_INPUT, timeout=30000)
+                composer = page.locator(SELECTOR_INPUT).first
+                composer.click()
+                time.sleep(random.uniform(0.5, 1.5))
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Backspace")
+                if fast:
+                    human_type(page, it["message"])
+                else:
+                    paste_text(page, it["message"])
+                time.sleep(0.5)
+                time.sleep(random.uniform(0.4, 1.2))
+                page.locator(SELECTOR_SEND).first.click()
+                time.sleep(random.uniform(1.0, 2.0))
+                time.sleep(random.uniform(0.5, 1.0))
+
+                snip = _norm_snippet(it["message"])
+                _verify_ms = VERIFY_FAST_MS if fast else VERIFY_SCHED_MS
+
+                try:
+                    page.wait_for_function("(s) => window.__waReady && window.__waReady(s)",
+                                           arg=snip, timeout=_verify_ms)
+                    delivered = True
+                    _DIAG = page.evaluate("(s) => window.__waMsgStatus(s)", snip)
+                except Exception:
+                    try:
+                        status = page.evaluate("(s) => window.__waMsgStatus(s)", snip)
+                    except Exception:
+                        status = 'probe-failed'
+                    _DIAG = status
+                    delivered = status in ('sent', 'delivered', 'read')
+
+                screenshot_b64 = _capture_screenshot(page)
+                last_screenshot = screenshot_b64
+                last_diag = _DIAG
+
+                if not delivered:
+                    try:
+                        time.sleep(1.5)
+                        status2 = page.evaluate("(s) => window.__waMsgStatus(s)", snip)
+                        if status2 in ('sent', 'delivered', 'read'):
+                            delivered = True
+                            _DIAG = status2
+                            last_diag = status2
+                            print("   ✅ Late check: delivery tick now visible - marking SENT")
+                    except Exception:
+                        pass
+
+                debug_html = None
+                if not delivered and _DIAG == 'unknown':
+                    try:
+                        debug_html = page.evaluate("(s) => window.__waSnippet(s)", snip)
+                    except Exception:
+                        debug_html = None
+
+                if delivered:
+                    item_sent = True
+                    break  # success → no more intra-run retries
+                else:
+                    # Not delivered — decide whether to intra-run retry
+                    reason_map = {
+                        'clock': 'WhatsApp still shows the pending clock icon - message has not left the device yet',
+                        'bubble-not-found': 'Could not find the sent message bubble in the chat pane',
+                        'unknown': 'Message bubble found but no known delivery-status marker matched (raw bubble HTML attached)',
+                        'probe-failed': 'Delivery-status probe crashed while inspecting the page',
+                    }
+                    last_error = reason_map.get(_DIAG, 'Delivery not confirmed in chat')
+                    if debug_html:
+                        last_error += "\n\n--- debug: matched bubble HTML (first 1200 chars) ---\n" + debug_html
+                    # Only retry within run on clock with attempts left
+                    if _DIAG == 'clock' and attempt < intra_attempts:
+                        print(f"   ⏳ Clock still pending, retrying immediately (attempt {attempt+1}/{intra_attempts})...")
+                        time.sleep(3)
+                        continue
+                    else:
+                        break  # give up this run, let DB retry logic handle next scheduled run if attempts remain
+
+            except Exception as e:
+                last_error = str(e)
+                last_diag = 'exception'
+                last_screenshot = _capture_screenshot(page)
+                print(f"   ❌ Exception on attempt {attempt}: {e}")
+                # brief pause before intra-run retry if not last attempt
+                if attempt < intra_attempts:
+                    time.sleep(3)
+                    # recreate page if it died
+                    page = _ensure_page(context, page)
+                    if page is None:
+                        try:
+                            page = context.new_page()
+                            page.goto("https://web.whatsapp.com", wait_until="domcontentloaded")
+                            page.wait_for_selector(SELECTOR_CHAT_LIST, timeout=30000)
+                        except Exception:
+                            break
+                else:
+                    break
+
+        # ---- record result (always, never throw) ----
         try:
-            print(f"📨 [{i+1}/{len(items)}] {it['label']} to tenant {it['tenant_id']} {num}...")
-            page.goto(f"https://web.whatsapp.com/send?phone={num}", wait_until="domcontentloaded")
-            page.wait_for_selector(SELECTOR_INPUT, timeout=30000)
-            composer = page.locator(SELECTOR_INPUT).first
-            composer.click()
-            time.sleep(random.uniform(0.5, 1.5))
-            page.keyboard.press("Control+A")
-            page.keyboard.press("Backspace")
-            if fast:
-                human_type(page, it["message"])
-            else:
-                paste_text(page, it["message"])
-            time.sleep(0.5)
-            time.sleep(random.uniform(0.4, 1.2))
-            page.locator(SELECTOR_SEND).first.click()
-            time.sleep(random.uniform(1.0, 2.0))
-            # Verify delivery: the outgoing message must actually appear in
-            # the chat pane (#main). Checking only the composer being cleared
-            # is NOT enough — a failed paste also leaves it empty.
-            import time as _t
-            _t.sleep(random.uniform(0.5, 1.0))
-            # Delivery proof: locate our bubble, then read its status via
-            # _WA_STATUS_PROBE_JS (defined once, injected once, used for
-            # every check below — see the constant near the top of this
-            # file for why that matters). 'sent'/'delivered'/'read' = PASS,
-            # 'clock' = genuinely still pending, 'bubble-not-found' /
-            # 'unknown' are diagnosed further below.
-            snip = _norm_snippet(it["message"])
-            _verify_ms = 30000 if fast else 60000
-
-            try:
-                page.wait_for_function("(s) => window.__waReady && window.__waReady(s)",
-                                       arg=snip, timeout=_verify_ms)
-                delivered = True
-                _DIAG = page.evaluate("(s) => window.__waMsgStatus(s)", snip)
-            except Exception:
-                # Timed out — read the current status directly for the
-                # failure record instead of assuming why it timed out.
-                try:
-                    status = page.evaluate("(s) => window.__waMsgStatus(s)", snip)
-                except Exception:
-                    status = 'probe-failed'
-                _DIAG = status
-                delivered = status in ('sent', 'delivered', 'read')
-
-            # Screenshot of the chat right after send attempt (proof)
-            screenshot_b64 = None
-            try:
-                import base64 as _b64
-                screenshot_b64 = _b64.b64encode(page.screenshot(full_page=False)).decode('utf-8')
-            except Exception:
-                pass
-
-            # Late-tick re-check: the ✓ can render a moment after our first
-            # read (network round trip). Re-read status once more before
-            # giving up — using the SAME function, not a re-implementation.
-            if not delivered:
-                try:
-                    _t.sleep(1.0)
-                    status2 = page.evaluate("(s) => window.__waMsgStatus(s)", snip)
-                    if status2 in ('sent', 'delivered', 'read'):
-                        delivered = True
-                        _DIAG = status2
-                        print("   ✅ Late check: delivery tick now visible - marking SENT")
-                except Exception:
-                    pass
-
-            # When we still can't confirm delivery and the bubble WAS found
-            # (i.e. WhatsApp's markup for the status icon didn't match any
-            # of our detection strategies — 'unknown'), capture the bubble's
-            # raw HTML so this is a self-diagnosing failure: the exact
-            # markup needed to add a matching selector is right there in
-            # the log instead of requiring another guess.
-            debug_html = None
-            if not delivered and _DIAG == 'unknown':
-                try:
-                    debug_html = page.evaluate("(s) => window.__waSnippet(s)", snip)
-                except Exception:
-                    debug_html = None
-
             if test_number:
                 it = {**it, "phone_number": wm.normalize_phone(test_number)}
             reminder = {
                 "id": it["reminder_id"], "tenant_id": it["tenant_id"],
                 "phone_number": it["phone_number"], "billing_month": it["billing_month"],
             }
-            if delivered:
+            if item_sent:
                 if it.get("log_id"):
-                    _mark_log_sent(it["log_id"], screenshot_b64)
+                    _mark_log_sent(it["log_id"], last_screenshot)
+                elif it.get("is_retry"):
+                    # retry NOTIFY was not a QUEUED log — insert SENT directly
+                    log_reminder_send(_BATCH, reminder, it["send_type"], it["message"], "SENT",
+                                      screenshot_b64=last_screenshot)
                 else:
                     log_reminder_send(_BATCH, reminder, it["send_type"], it["message"], "SENT",
-                                      screenshot_b64=screenshot_b64)
+                                      screenshot_b64=last_screenshot)
                 stamp_reminder_sent(it["reminder_id"], it.get("stamp_col", "notify_sent_at"))
                 sent += 1
-                print(f"   ✅ Sent {it['label']} to tenant {it['tenant_id']}")
+                print(f"   ✅ Sent {it['label']} to tenant {it['tenant_id']} (status: {last_diag})")
             else:
-                reason = {
-                    'clock': 'WhatsApp still shows the pending clock icon - message has not left the device yet',
-                    'bubble-not-found': 'Could not find the sent message bubble in the chat pane',
-                    'unknown': 'Message bubble found but no known delivery-status marker matched '
-                               '(WhatsApp\'s UI likely changed - raw bubble HTML attached below for diagnosis)',
-                    'probe-failed': 'Delivery-status probe crashed while inspecting the page',
-                }.get(_DIAG, 'Delivery not confirmed in chat')
-                if debug_html:
-                    reason += "\n\n--- debug: matched bubble HTML (first 1200 chars) ---\n" + debug_html
+                # FAILED — only stamp if this was the final allowed attempt
+                # (prevents retry starvation)
+                failed_count_after = _failed_count(it["reminder_id"], it["send_type"])
+                # For NOTIFY with log_id, failed_count is from new logic; use intra count
+                will_exhaust = (failed_count_after + 1) >= MAX_ATTEMPTS
+                # For synthetic retry items, count differently
+                if it.get("is_retry"):
+                    will_exhaust = True  # this was the retry, no further
                 if it.get("log_id"):
-                    _mark_log_failed(it["log_id"], reason, screenshot_b64)
+                    _mark_log_failed(it["log_id"], last_error or f"Delivery unconfirmed (status: {last_diag})", last_screenshot)
                 else:
                     log_reminder_send(_BATCH, reminder, it["send_type"], it["message"], "FAILED",
-                                      error=reason, screenshot_b64=screenshot_b64)
-                if _DIAG in ('clock', 'bubble-not-found', 'unknown', 'probe-failed') \
-                        and it["send_type"] in ("D1", "DUE", "HISAB"):
-                    # One attempt per stage, ever. These diagnostics mean the
-                    # click happened and WhatsApp accepted/queued the message
-                    # client-side (delivery usually follows). Leaving these
-                    # unstamped made every later run re-send them (duplicate-
-                    # storm failure mode); failures stay visible in the send
-                    # log instead.
+                                      error=last_error or f"Delivery unconfirmed (status: {last_diag})",
+                                      screenshot_b64=last_screenshot)
+                if will_exhaust and it["send_type"] in ("D1", "DUE", "HISAB"):
                     stamp_reminder_sent(it["reminder_id"], it.get("stamp_col", "d1_sent_at"))
-                    print(f"   ℹ️  stamped {it['stamp_col']} despite unconfirmed delivery (no cross-run retry)")
+                    print(f"   ℹ️  Max attempts reached — stamped {it['stamp_col']} to prevent further retries")
+                elif it["send_type"] in ("D1", "DUE", "HISAB"):
+                    print(f"   ❌ Delivery unconfirmed (status: {last_diag}) — will retry next run (attempt {failed_count_after+1}/{MAX_ATTEMPTS})")
+                else:
+                    # NOTIFY: if not exhausted, the retry helper will re-queue it
+                    if not will_exhaust:
+                        print(f"   ❌ NOTIFY failed (status: {last_diag}) — queued for retry")
+                    else:
+                        # final NOTIFY failure also stamps to hide from future 0-outstanding checks?
+                        stamp_reminder_sent(it["reminder_id"], it.get("stamp_col", "notify_sent_at"))
                 failed += 1
-                print(f"   ❌ Delivery unconfirmed for tenant {it['tenant_id']} (status: {_DIAG})")
         except Exception as e:
-            print(f"   ❌ Failed for tenant {it['tenant_id']}: {e}")
-            if test_number:
-                it = {**it, "phone_number": wm.normalize_phone(test_number)}
-            reminder = {
-                "id": it["reminder_id"], "tenant_id": it["tenant_id"],
-                "phone_number": it["phone_number"], "billing_month": it["billing_month"],
-            }
-            log_reminder_send(_BATCH, reminder, it["send_type"], it.get("message"), "FAILED", str(e))
+            # Logging itself must not kill the batch
+            print(f"   ❌ Failed to write log for tenant {it['tenant_id']}: {e}")
             failed += 1
 
     context.close()
@@ -591,8 +772,6 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
 
 
 def _mark_log_failed(log_id, error, screenshot_b64=None):
-    """Terminal FAILED on the original queued row — prevents drain-loop
-    re-picks (duplicate sends) and phantom QUEUED entries."""
     conn = get_db_connection(as_dict=True)
     cur = conn.cursor()
     if screenshot_b64:
@@ -640,9 +819,6 @@ _SESSION_STARTED = None
 
 
 class _StateTee:
-    """Tees sender lines into .sender_state.json so the GUI can show live
-    progress of whichever run is active (instant or scheduled)."""
-
     def __init__(self, orig):
         self._orig = orig
         self.run_id = None
@@ -672,7 +848,7 @@ class _StateTee:
             except Exception:
                 return
             if st.get("run_id") != self.run_id:
-                return  # a newer run owns the state file
+                return
             st.setdefault("lines", []).append(
                 {"ts": _dt.now().strftime("%H:%M:%S"), "line": str(line)[:300]})
             st["lines"] = st["lines"][-200:]
@@ -725,19 +901,6 @@ _RETRY_PENDING_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "
 
 
 def _spawn_background_retry(month=None):
-    """An instant trigger couldn't get the send lock within the snappy 60s
-    window (e.g. a 3rd payment landed while a busy run was still sending
-    2 messages for an earlier one). The item is already durably QUEUED in
-    the DB, but nothing else is scheduled to come pick it up soon — the
-    previous behaviour just gave up and left it stranded until some
-    unrelated future trigger or the next scheduled run.
-
-    Hand off a detached background process instead: it blocks on the same
-    lock with NO timeout, so it starts sending the instant it's free —
-    still driven by this trigger, not by luck.
-
-    De-duped via a marker file so 2-3 triggers arriving during the same
-    busy window spawn exactly one retry, not a pile of redundant ones."""
     if os.path.exists(_RETRY_PENDING_FILE):
         return False
     try:
@@ -749,7 +912,7 @@ def _spawn_background_retry(month=None):
         cmd += ["--month", month]
     try:
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                          stdin=subprocess.DEVNULL, start_new_session=True)
+                         stdin=subprocess.DEVNULL, start_new_session=True)
         return True
     except Exception:
         try:
@@ -777,18 +940,14 @@ def main():
     ap.add_argument("--kind", default=None, choices=[None, "instant", "scheduled"],
                     help="Launcher hint; auto-detected when omitted.")
     ap.add_argument("--wait-lock", action="store_true",
-                    help="Internal: used by the background-retry hand-off. "
-                         "Blocks on the send lock with no timeout instead "
-                         "of giving up after 60s.")
+                    help="Internal: used by background-retry hand-off.")
     args = ap.parse_args()
     if not args.kind:
-        # systemd services carry INVOCATION_ID; GUI/API spawns do not.
         args.kind = "scheduled" if os.environ.get("INVOCATION_ID") else "instant"
 
     global _BATCH, _HEADED
     _HEADED = args.headed
 
-    # Live-run state for GUI monitoring
     global _TEE
     import sys as _sys
     _TEE = _StateTee(_sys.__stdout__)
@@ -796,7 +955,7 @@ def main():
     import builtins as _builtins
     _raw_print = _builtins.print
 
-    def print(*a, **k):  # noqa: A001 - mirror every sender line to GUI state
+    def print(*a, **k):  # noqa: A001
         _raw_print(*a, **k)
         try:
             _TEE.log_line(" ".join(str(x) for x in a))
@@ -807,19 +966,10 @@ def main():
     _TEE.run_id = _st["run_id"]
     _rid = _st["run_id"]
 
-    # Single-flight lock: two rapid triggers (e.g. deposit save followed
-    # instantly by rent save) each spawn a sender; both would open the same
-    # WhatsApp profile and the second would crash on the profile lock,
-    # silently dropping its queued messages. Block here instead — the second
-    # run waits for the first to finish, then picks up everything new.
     import fcntl
     lock_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".wa_sender.lock")
     with open(lock_path, "w") as lock_f:
         if args.kind == "instant" and args.wait_lock:
-            # We ARE the background retry that got handed off after an
-            # earlier trigger couldn't get the lock in time. Block for as
-            # long as it takes — we were explicitly deputized for this,
-            # so there's no "give up" point; the busy run WILL finish.
             try:
                 os.remove(_RETRY_PENDING_FILE)
             except Exception:
@@ -829,13 +979,6 @@ def main():
             except OSError:
                 pass
         elif args.kind == "instant":
-            # Two payments in quick succession (deposit then rent) each trigger
-            # an instant run. The second must not be dropped. Instead of
-            # immediate LOCK_NB skip (which left rent NOTIFY stuck QUEUED
-            # until the next 10AM schedule), wait up to 60s for the first
-            # run to finish, then build a fresh queue and send whatever is
-            # still pending. This preserves single-flight without losing
-            # the second transaction's notification.
             acquired = False
             for _w in range(60):
                 try:
@@ -845,20 +988,12 @@ def main():
                 except OSError:
                     time.sleep(1)
             if not acquired:
-                # Still busy after 60s (e.g. a run ahead of us is sending
-                # multiple messages with human-like delays). Don't strand
-                # this trigger waiting for luck — hand it to a background
-                # process that blocks on the lock and sends the instant
-                # it's free.
                 handed_off = _spawn_background_retry(args.month)
                 if handed_off:
-                    print("↪️  Sender still busy after 60s — handed off to a "
-                          "background retry that will send as soon as it's free.")
+                    print("↪️  Sender still busy after 60s — handed off to a background retry that will send as soon as it's free.")
                     _state_finish("retry-queued", {"sent": 0, "failed": 0, "skipped": 0}, run_id=_rid)
                 else:
-                    print("⏭  Sender still busy after 60s — a retry is already "
-                          "queued behind it (or hand-off failed); it will pick "
-                          "this up too.")
+                    print("⏭  Sender still busy after 60s — a retry is already queued behind it.")
                     _state_finish("skipped-busy", {"sent": 0, "failed": 0, "skipped": 0}, run_id=_rid)
                 return
         else:
@@ -868,14 +1003,8 @@ def main():
                 pass
 
         try:
-            # Instant runs are triggered per-payment; two rapid saves
-            # (deposit + rent within seconds) would otherwise build the
-            # queue before the second NOTIFY is queued. Debounce 5s so
-            # both land in the same batch and are sent together fluently.
             if args.kind == "instant":
                 time.sleep(5)
-            # Drain loop: messages can be queued while this run is still in
-            # progress (queue was built before the browser finished booting).
             max_passes = 3
             for _pass in range(max_passes):
                 items = build_items(args.month, notify_only=(args.kind == "instant"))
@@ -887,7 +1016,6 @@ def main():
                 if args.test_number and not args.dry_run and not args.limit:
                     args.limit = 1
                 _BATCH = datetime.now().strftime("%Y%m%d%H%M%S") + "_" + uuid.uuid4().hex[:6]
-                # Instant notifies must feel fluent: type fast, short pause
                 _fast = True if args.kind == "instant" else args.fast
                 _min_d = 10 if args.kind == "instant" else args.min_delay
                 _max_d = 20 if args.kind == "instant" else args.max_delay
@@ -895,6 +1023,9 @@ def main():
                            args.test_number, _fast)
                 if args.dry_run or (args.limit and args.limit <= 1):
                     break
+                # drain: if new items appeared during long send, loop again
+                if _pass < max_passes - 1:
+                    time.sleep(2)
         finally:
             _state_finish("finished", summary=_LAST_SUMMARY or {"sent": 0, "failed": 0, "skipped": 0}, run_id=_rid)
             fcntl.flock(lock_f, fcntl.LOCK_UN)
