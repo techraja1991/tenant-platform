@@ -166,10 +166,10 @@ def get_dashboard_stats():
     active_tenants = cur.fetchone()['count']
 
     cur.execute("""
-        SELECT COALESCE(SUM(new_baki), 0.00) as total_outstanding,
-               COALESCE(SUM(bhadu_applied), 0.00) as monthly_rent_income,
-               COALESCE(SUM(jama), 0.00) as monthly_collections,
-               COALESCE(SUM(prev_baki), 0.00) as carried_forward
+        SELECT COALESCE(SUM(CASE WHEN payment_status = 'Settled' THEN 0 ELSE new_baki END), 0.00) as total_outstanding,
+                COALESCE(SUM(bhadu_applied), 0.00) as monthly_rent_income,
+                COALESCE(SUM(jama), 0.00) as monthly_collections,
+                COALESCE(SUM(prev_baki), 0.00) as carried_forward
         FROM rental_core.monthly_ledgers 
         WHERE billing_month = %s;
     """, (execution_month,))
@@ -188,7 +188,7 @@ def get_dashboard_stats():
 
     cur.execute("""
         SELECT COALESCE(SUM(gross_baki), 0.00) AS fixed_due_total,
-               COALESCE(SUM(CASE WHEN new_baki > 0 THEN new_baki ELSE 0 END), 0.00) AS current_due_total
+                COALESCE(SUM(CASE WHEN payment_status = 'Settled' THEN 0 WHEN new_baki > 0 THEN new_baki ELSE 0 END), 0.00) AS current_due_total
         FROM rental_core.monthly_ledgers
         WHERE billing_month = %s;
     """, (execution_month,))
@@ -198,8 +198,8 @@ def get_dashboard_stats():
 
     cur.execute("""
         SELECT pm.apartment_name,
-               COALESCE(SUM(ml.new_baki), 0.00) AS outstanding,
-               COUNT(ml.id) AS units
+                COALESCE(SUM(CASE WHEN ml.payment_status = 'Settled' THEN 0 ELSE ml.new_baki END), 0.00) AS outstanding,
+                COUNT(ml.id) AS units
         FROM rental_core.monthly_ledgers ml
         JOIN rental_core.rooms r ON ml.room_id = r.id
         JOIN rental_core.property_masters pm ON r.master_id = pm.id
@@ -210,7 +210,7 @@ def get_dashboard_stats():
     outstanding_by_property = cur.fetchall()
 
     cur.execute("""
-        SELECT COALESCE(SUM(new_baki), 0.00) AS older_outstanding
+        SELECT COALESCE(SUM(CASE WHEN payment_status = 'Settled' THEN 0 ELSE new_baki END), 0.00) AS older_outstanding
         FROM rental_core.monthly_ledgers
         WHERE billing_month < %s;
     """, (execution_month,))
@@ -258,9 +258,9 @@ def report_monthly_summary():
                COALESCE(SUM(jama), 0) AS collected,
                COALESCE(SUM(prev_baki), 0) AS initial_pending,
                COALESCE(SUM(prev_baki), 0) - COALESCE(SUM(prev_jama), 0) AS initial_outstanding_net,
-               COALESCE(SUM(CASE WHEN new_baki > 0 THEN new_baki ELSE 0 END), 0) AS outstanding_pending,
-               COALESCE(SUM(new_baki), 0) AS outstanding_net,
-               COUNT(*) AS units
+                COALESCE(SUM(CASE WHEN payment_status = 'Settled' THEN 0 WHEN new_baki > 0 THEN new_baki ELSE 0 END), 0) AS outstanding_pending,
+                COALESCE(SUM(CASE WHEN payment_status = 'Settled' THEN 0 ELSE new_baki END), 0) AS outstanding_net,
+                COUNT(*) AS units
         FROM rental_core.monthly_ledgers
         GROUP BY billing_month
         ORDER BY billing_month ASC;
@@ -306,8 +306,8 @@ def report_property_monthly():
                COALESCE(SUM(ml.gross_baki), 0) AS gross_billed,
                COALESCE(SUM(ml.jama), 0) AS collected,
                COALESCE(SUM(ml.prev_baki), 0) AS initial_pending,
-               COALESCE(SUM(CASE WHEN ml.new_baki > 0 THEN ml.new_baki ELSE 0 END), 0) AS outstanding_pending,
-               COALESCE(SUM(ml.new_baki), 0) AS outstanding_net,
+                COALESCE(SUM(CASE WHEN ml.payment_status = 'Settled' THEN 0 WHEN ml.new_baki > 0 THEN ml.new_baki ELSE 0 END), 0) AS outstanding_pending,
+                COALESCE(SUM(CASE WHEN ml.payment_status = 'Settled' THEN 0 ELSE ml.new_baki END), 0) AS outstanding_net,
                COUNT(*) AS units
         FROM rental_core.monthly_ledgers ml
         JOIN rental_core.rooms r ON ml.room_id = r.id
@@ -398,11 +398,12 @@ def get_dashboard_kpi():
                t.phone_number,
                r.display_address,
                pm.apartment_name,
-               ml.gross_baki,
-               ml.jama,
-               ml.new_baki,
-               ml.payment_status,
-               ml.prev_baki,
+                ml.gross_baki,
+                ml.jama,
+                ml.new_baki,
+                ml.payment_status,
+                ml.settled_estimate,
+                ml.prev_baki,
                ml.month_total,
                ml.bhadu_applied,
                ml.light_bill,
@@ -882,6 +883,13 @@ def tenant_year_ledger(tenant_id: int, year: int = Query(..., ge=2000, le=2100))
         conn.close()
         raise HTTPException(status_code=404, detail="Tenant not found")
 
+    try:
+        _hist_all = tenant.get('settlement_history') or []
+        if isinstance(_hist_all, str):
+            _hist_all = json.loads(_hist_all)
+    except Exception:
+        _hist_all = []
+
     cur.execute("""
         SELECT COUNT(*) AS c FROM rental_core.tenants t
         JOIN rental_core.rooms r ON t.room_id = r.id
@@ -1023,6 +1031,7 @@ def tenant_year_ledger(tenant_id: int, year: int = Query(..., ge=2000, le=2100))
                 "jama": float(lrow['jama'] or 0),
                 "new_baki": float(lrow['new_baki'] or 0),
                 "payment_status": lrow['payment_status'],
+                "settled_estimate": bool(lrow.get('settled_estimate')),
                 "jama_date": lrow['jama_date'],
                 "light_bill_type": lrow['light_bill_type'],
                 # Stored manual overrides (Ledger Edit) + actuals + flag
@@ -1042,13 +1051,90 @@ def tenant_year_ledger(tenant_id: int, year: int = Query(..., ge=2000, le=2100))
                 "light_bill": 0.0, "gas_bill": 0.0, "maintenance_applied": 0.0,
                 "common_misc_expenses": 0.0, "month_total": 0.0, "gross_baki": 0.0,
                 "jama": 0.0, "new_baki": 0.0, "payment_status": "Not Billed",
+                "settled_estimate": False,
                 "jama_date": '0', "light_bill_type": 'NORMAL',
                 "light_bill_actual": None, "light_bill_manual": None,
                 "gas_bill_actual": None, "gas_bill_manual": None,
                 "maintenance_actual": None, "maintenance_manual": None,
                 "common_misc_actual": None, "common_misc_manual": None,
                 "manual_override": False,
+                "settlement_summary": None,
+                "settlement_basis": False,
+                "estimated_light": None,
+                "estimated_gas": None,
             })
+
+        # Settlement summary for the month popup (recorded facts only).
+        _settle_pays = [p for p in pay_rows if p['payment_type'] in ('SETTLEMENT', 'REFUND')]
+        _entries = [h for h in _hist_all if isinstance(h, dict) and h.get('billing_month') == bm]
+        if _settle_pays:
+            _on_est = bool(lrow and lrow.get('settled_estimate')) or any(h.get('used_estimates') for h in _entries)
+            base["settlement_summary"] = {
+                "settled_amount": round(sum(float(p['amount'] or 0) for p in pay_rows if p['payment_type'] == 'SETTLEMENT'), 2),
+                "refunded_amount": round(sum(float(p['amount'] or 0) for p in pay_rows if p['payment_type'] == 'REFUND'), 2),
+                "on_estimates": _on_est,
+                "est_light": next((h.get('est_light') for h in reversed(_entries) if h.get('est_light') is not None), None),
+                "est_gas": next((h.get('est_gas') for h in reversed(_entries) if h.get('est_gas') is not None), None),
+                "entries": [
+                    {"payment_type": p['payment_type'], "amount": float(p['amount'] or 0),
+                     "payment_date": str(p['payment_date']), "payment_mode": p['payment_mode'],
+                     "note": p['note']}
+                    for p in sorted(_settle_pays, key=lambda p: (str(p['payment_date']), p['id']))
+                ],
+            }
+        else:
+            base["settlement_summary"] = None
+
+        # Settlement-basis overlay: a Settled closing month whose actual ledger
+        # was never prepared shows blank zeros from its skeleton row. Replay the
+        # settlement-basis breakdown instead (history snapshot preferred, fresh
+        # recompute fallback for pre-snapshot settlements). Only blank fields
+        # are overlaid — stored/manual values always win. Chain facts
+        # (prev/jama) stay live; totals re-derive from them.
+        base["settlement_basis"] = False
+        base["estimated_light"] = None
+        base["estimated_gas"] = None
+        if lrow and lrow['payment_status'] == 'Settled' and _entries:
+            _snap_e = next((h for h in reversed(_entries) if isinstance(h.get('brk'), dict)), None)
+            if _snap_e is not None:
+                _brk = _snap_e['brk']
+                _eff = {k: float(_brk.get(k) or 0) for k in ('bhadu', 'light', 'gas', 'maint', 'common')}
+                _est_l = _snap_e.get('est_light')
+                _est_g = _snap_e.get('est_gas')
+            else:
+                try:
+                    _le = datetime.strptime(_entries[-1].get('lease_end_date', f"{bm}-28")[:10], "%Y-%m-%d").date()
+                    _s2 = _compute_settlement(cur, tenant_id, _le, bm,
+                                              {'bhadu': None, 'light': None, 'gas': None,
+                                               'maintenance': None, 'common': None})
+                    _eff = {'bhadu': float(_s2['bhadu']), 'light': float(_s2['light']),
+                            'gas': float(_s2['gas']), 'maint': float(_s2['maint']),
+                            'common': float(_s2['common'])}
+                    _est_l = float(_s2['light']) if _s2['light_from_est'] else None
+                    _est_g = float(_s2['gas']) if _s2['gas_from_est'] else None
+                except Exception:
+                    _eff = None
+            if _eff is not None:
+                _man_l = lrow.get('light_bill_manual')
+                _man_g = lrow.get('gas_bill_manual')
+                _man_m = lrow.get('maintenance_manual')
+                _man_c = lrow.get('common_misc_manual')
+                _b = float(lrow['bhadu_applied'] or 0) or _eff['bhadu']
+                _l = float(_man_l) if _man_l is not None else (float(lrow['light_bill'] or 0) or _eff['light'])
+                _g = float(_man_g) if _man_g is not None else (float(lrow['gas_bill'] or 0) or _eff['gas'])
+                _m = float(_man_m) if _man_m is not None else (float(lrow['maintenance_applied'] or 0) or _eff['maint'])
+                _c = float(_man_c) if _man_c is not None else (float(lrow['common_misc_expenses'] or 0) or _eff['common'])
+                _mt = round(_b + _l + _g + _m + _c, 2)
+                _gb = round(base["prev_baki"] + _mt - base["prev_jama"], 2)
+                base.update({
+                    "bhadu_applied": _b, "light_bill": _l, "gas_bill": _g,
+                    "maintenance_applied": _m, "common_misc_expenses": _c,
+                    "month_total": _mt, "gross_baki": _gb,
+                    "new_baki": round(_gb - base["jama"], 2),
+                    "estimated_light": _est_l, "estimated_gas": _est_g,
+                    "settlement_basis": True,
+                })
+
         months.append(base)
 
     # Get deposit status for this tenant
@@ -1207,10 +1293,15 @@ def _compute_settlement(cur, tenant_id, le_date, billing_month, customs):
     cur.execute("SELECT * FROM rental_core.monthly_ledgers WHERE tenant_id = %s AND billing_month = %s", (tenant_id, billing_month))
     lrow = cur.fetchone()
 
-    # Estimates for provisional months: max of last up-to-6 billed months.
+    # Estimates for uncompiled months: max of last up-to-6 billed months
+    # (max of available months when fewer exist). Uncompiled = no row, or a
+    # skeleton row whose bills were never entered. A compiled month always has
+    # bhadu > 0, so its field zeros are genuine and must NOT be estimated over.
+    _row_bhadu = float(lrow['bhadu_applied'] or 0) if lrow else 0.0
+    _uncompiled = (not lrow) or (_row_bhadu == 0)
     estimated_light = None
     estimated_gas = None
-    if not lrow:
+    if _uncompiled:
         cur.execute("""
             SELECT COALESCE(light_bill, 0) AS lb, COALESCE(gas_bill, 0) AS gb
             FROM rental_core.monthly_ledgers
@@ -1231,49 +1322,45 @@ def _compute_settlement(cur, tenant_id, le_date, billing_month, customs):
     custom_maintenance = customs.get('maintenance')
     custom_common = customs.get('common')
 
+    # Defaults from tenant profile + history estimates (used when uncompiled).
     is_half = False
-    if custom_bhadu is not None:
-        bhadu = float(custom_bhadu)
-    else:
-        base = float(tenant['base_rent_applied'] or tenant['default_base_rent'] or 3300)
-        half_val = tenant.get('half_rent_applied') or tenant.get('room_half_rent') or tenant.get('default_half_rent')
-        half_val = float(half_val) if half_val else 0
-        is_half = _settlement_is_half_month(tenant.get('lease_start_date'), le_date, billing_month)
-        half_computed = _settlement_half_rent(base, half_val)
-        bhadu = half_computed if is_half else base
+    base = float(tenant['base_rent_applied'] or tenant['default_base_rent'] or 3300)
+    half_val = tenant.get('half_rent_applied') or tenant.get('room_half_rent') or tenant.get('default_half_rent')
+    half_val = float(half_val) if half_val else 0
+    is_half = _settlement_is_half_month(tenant.get('lease_start_date'), le_date, billing_month)
+    half_computed = _settlement_half_rent(base, half_val)
+    bhadu = half_computed if is_half else base
+    maint = float(tenant['maintenance_applied'] or 0)
+    common = 0.0
+    light = estimated_light if estimated_light is not None else 0.0
+    gas = estimated_gas if estimated_gas is not None else 0.0
 
-    if custom_maintenance is not None:
-        maint = float(custom_maintenance)
-    else:
-        maint = float(tenant['maintenance_applied'] or 0)
-
-    if custom_common is not None:
-        common = float(custom_common)
-    else:
-        common = 0.0
-
-    if custom_light is not None:
-        light = float(custom_light)
-    else:
-        light = estimated_light if estimated_light is not None else 0.0
-
-    if custom_gas is not None:
-        gas = float(custom_gas)
-    else:
-        gas = estimated_gas if estimated_gas is not None else 0.0
-
-    # Ledger values win when a row exists (manual overrides already folded into
-    # the effective columns by the DB generated expressions), then customs.
+    # Stored ledger values win when the month is compiled (manual overrides
+    # already folded into the effective columns by the DB generated
+    # expressions). For skeleton rows only persisted manuals are real — the
+    # rest keeps the tenant/estimate defaults above. Preview customs win last.
     if lrow:
-        bhadu = float(lrow['bhadu_applied'] or 0)
-        light = float(lrow.get('light_bill_manual') if lrow.get('light_bill_manual') is not None else (lrow['light_bill'] or 0))
-        gas = float(lrow.get('gas_bill_manual') if lrow.get('gas_bill_manual') is not None else (lrow['gas_bill'] or 0))
-        maint = float(lrow.get('maintenance_manual') if lrow.get('maintenance_manual') is not None else (lrow['maintenance_applied'] or 0))
-        common = float(lrow.get('common_misc_manual') if lrow.get('common_misc_manual') is not None else (lrow['common_misc_expenses'] or 0))
+        if _row_bhadu > 0:
+            bhadu = _row_bhadu
+            light = float(lrow.get('light_bill_manual') if lrow.get('light_bill_manual') is not None else (lrow['light_bill'] or 0))
+            gas = float(lrow.get('gas_bill_manual') if lrow.get('gas_bill_manual') is not None else (lrow['gas_bill'] or 0))
+            maint = float(lrow.get('maintenance_manual') if lrow.get('maintenance_manual') is not None else (lrow['maintenance_applied'] or 0))
+            common = float(lrow.get('common_misc_manual') if lrow.get('common_misc_manual') is not None else (lrow['common_misc_expenses'] or 0))
+        else:
+            if lrow.get('light_bill_manual') is not None:
+                light = float(lrow['light_bill_manual'])
+            if lrow.get('gas_bill_manual') is not None:
+                gas = float(lrow['gas_bill_manual'])
+            if lrow.get('maintenance_manual') is not None:
+                maint = float(lrow['maintenance_manual'])
+            if lrow.get('common_misc_manual') is not None:
+                common = float(lrow['common_misc_manual'])
         if custom_bhadu is not None:
             bhadu = float(custom_bhadu)
         if custom_maintenance is not None:
             maint = float(custom_maintenance)
+        if custom_common is not None:
+            common = float(custom_common)
         if custom_light is not None:
             light = float(custom_light)
         if custom_gas is not None:
@@ -1358,9 +1445,20 @@ def _compute_settlement(cur, tenant_id, le_date, billing_month, customs):
     else:
         is_fully_settled = True
 
+    # Estimate provenance: True when the value in play came from history
+    # estimates — i.e. month uncompiled and neither customs nor persisted
+    # manuals overrode that utility. Drives the 'Settled (Est.)' badge,
+    # history snapshot, and later actual-vs-estimate true-up.
+    _manual_light = lrow.get('light_bill_manual') if lrow else None
+    _manual_gas = lrow.get('gas_bill_manual') if lrow else None
+    light_from_est = bool(_uncompiled and custom_light is None and _manual_light is None)
+    gas_from_est = bool(_uncompiled and custom_gas is None and _manual_gas is None)
+    used_estimates = bool(light_from_est or gas_from_est)
+
     return {
         "tenant": tenant,
         "lrow": lrow,
+        "uncompiled": _uncompiled,
         "prev_baki": prev_baki,
         "prev_jama": prev_jama,
         "is_half": is_half,
@@ -1371,6 +1469,9 @@ def _compute_settlement(cur, tenant_id, le_date, billing_month, customs):
         "common": common,
         "estimated_light": estimated_light,
         "estimated_gas": estimated_gas,
+        "light_from_est": light_from_est,
+        "gas_from_est": gas_from_est,
+        "used_estimates": used_estimates,
         "month_total": month_total,
         "gross_baki": gross_baki,
         "jama": jama,
@@ -1479,6 +1580,44 @@ async def get_final_settlement(
             } for h in cur.fetchall()
         ]
 
+        # Estimate true-up: this closing month was settled while light/gas were
+        # estimated. If the actual bills have since arrived (month compiled),
+        # report estimate-vs-actual variance so the residual is visible.
+        estimate_trueup = None
+        try:
+            _hist_json = tenant.get('settlement_history') or []
+            _snap = next((h for h in _hist_json
+                          if isinstance(h, dict) and h.get('billing_month') == billing_month
+                          and h.get('used_estimates')), None)
+        except Exception:
+            _snap = None
+        if _snap is not None:
+            _compiled_now = bool(lrow) and float(lrow['bhadu_applied'] or 0) > 0
+            _est_l = _snap.get('est_light')
+            _est_g = _snap.get('est_gas')
+            if _compiled_now:
+                _a_l = lrow.get('light_bill_actual')
+                _a_l = float(_a_l) if _a_l is not None else float(lrow['light_bill'] or 0)
+                _a_g = lrow.get('gas_bill_actual')
+                _a_g = float(_a_g) if _a_g is not None else float(lrow['gas_bill'] or 0)
+                _v_l = round(_a_l - _est_l, 2) if _est_l is not None else None
+                _v_g = round(_a_g - _est_g, 2) if _est_g is not None else None
+                _v_t = round(sum(v for v in (_v_l, _v_g) if v is not None), 2)
+            else:
+                _a_l = _a_g = _v_l = _v_g = _v_t = None
+            estimate_trueup = {
+                "settled_on_estimates": True,
+                "est_light": float(_est_l) if _est_l is not None else None,
+                "est_gas": float(_est_g) if _est_g is not None else None,
+                "actuals_arrived": _compiled_now,
+                "actual_light": _a_l,
+                "actual_gas": _a_g,
+                "var_light": _v_l,
+                "var_gas": _v_g,
+                "variance_total": _v_t,
+                "matches": (_v_t is not None and abs(_v_t) <= 0.01),
+            }
+
         # WhatsApp preview message + wa.me link for the settlement modal.
         # Reflects the (possibly custom-overridden) preview numbers above.
         def _amt(v):
@@ -1569,6 +1708,7 @@ async def get_final_settlement(
                 "pending": deposit_pending,
             },
             "history": history,
+            "estimate_trueup": estimate_trueup,
             "whatsapp_message": _wa_message,
             "whatsapp_link": _wa_link,
         }
@@ -1700,6 +1840,9 @@ async def record_settlement(tenant_id: int, data: SettlementRecord):
                                  'maintenance': None, 'common': None})
         tenant = s['tenant']
         deposit_received = s['deposit_received']
+        used_estimates = s['used_estimates']
+        est_light_snap = float(s['light']) if s['light_from_est'] else None
+        est_gas_snap = float(s['gas']) if s['gas_from_est'] else None
 
         # Use payment_type from frontend (validated against situation)
         payment_type = data.payment_type
@@ -1743,12 +1886,26 @@ async def record_settlement(tenant_id: int, data: SettlementRecord):
         settlement_entry = {
             "payment_id": payment_id,
             "lease_end_date": data.lease_end_date,
+            "billing_month": billing_month,
             "payment_date": data.payment_date,
             "payment_type": payment_type,
             "amount": float(data.amount),
             "payment_mode": data.payment_mode,
             "note": data.note or f'Final settlement {data.lease_end_date}',
-            "recorded_at": datetime.now().isoformat()
+            "recorded_at": datetime.now().isoformat(),
+            "used_estimates": used_estimates,
+            "est_light": est_light_snap,
+            "est_gas": est_gas_snap,
+            # Full effective breakdown on which basis this settlement was
+            # processed — replayed in Customer View for closing months whose
+            # actual ledger was never prepared.
+            "brk": {
+                "bhadu": float(s['bhadu']),
+                "light": float(s['light']),
+                "gas": float(s['gas']),
+                "maint": float(s['maint']),
+                "common": float(s['common'])
+            }
         }
 
         cur.execute("SELECT settlement_history FROM rental_core.tenants WHERE id = %s", (tenant_id,))
@@ -1781,6 +1938,40 @@ async def record_settlement(tenant_id: int, data: SettlementRecord):
                 is_active = CASE WHEN %s THEN 'N' ELSE is_active END
             WHERE id = %s
         """, (json.dumps(settlement_history), new_deposit_settled, new_deposit_settled_amount, new_deposit_settled_date, is_full_settlement, tenant_id))
+
+        # On FULL settlement, close the lease-end month in every ledger view:
+        # stamp it 'Settled'. Amounts are untouched (jama/new_baki stay the
+        # monthly truth) — only the display status changes. Partial settlements
+        # leave the true dues visible, so no stamp unless fully closed.
+        if is_full_settlement:
+            cur.execute("SELECT id FROM rental_core.monthly_ledgers WHERE tenant_id = %s AND billing_month = %s",
+                        (tenant_id, billing_month))
+            if not cur.fetchone():
+                cur.execute("""
+                    INSERT INTO rental_core.monthly_ledgers
+                        (room_id, tenant_id, billing_month, prev_baki, prev_jama, bhadu_applied,
+                         light_bill, gas_bill, maintenance_applied, common_misc_expenses)
+                    SELECT t.room_id, t.id, %s, %s, %s, 0.00, 0.00, 0.00, 0.00, 0.00
+                    FROM rental_core.tenants t WHERE t.id = %s
+                    ON CONFLICT (tenant_id, billing_month) DO NOTHING
+                """, (billing_month, prev_baki, prev_jama, tenant_id))
+                _cascade_ledger_chain(cur, tenant_id, billing_month)
+            # settled_estimate marks settlements closed before the actual
+            # utility bills arrived -> 'Settled (Est.)' badge + later true-up.
+            cur.execute("UPDATE rental_core.monthly_ledgers SET payment_status = 'Settled', settled_estimate = %s WHERE tenant_id = %s AND billing_month = %s",
+                        (used_estimates and is_full_settlement, tenant_id, billing_month))
+            # A full settlement closes the whole chain, not just the last month:
+            # intermediate months still showing Unpaid/Partial were covered by
+            # this closing payment (their dues rolled into the settled gross).
+            # Stamp them too so no dues total counts them again. Already-Paid
+            # months keep their status; only the closing month carries the
+            # estimate flag.
+            cur.execute("""
+                UPDATE rental_core.monthly_ledgers
+                SET payment_status = 'Settled'
+                WHERE tenant_id = %s AND billing_month <= %s
+                  AND COALESCE(payment_status, 'Unpaid') NOT IN ('Paid', 'Settled')
+            """, (tenant_id, billing_month))
 
         # NOTE: SETTLEMENT and REFUND are final settlement actions - they do NOT update monthly ledger jama
         # The ledger reflects monthly rent/bills. Settlement is a separate closing action.
@@ -2095,6 +2286,7 @@ def get_ledgers(billing_month: str = None):
             ml.jama_date,
             ml.new_baki,
             ml.payment_status,
+            ml.settled_estimate,
             ml.light_bill_type,
             ml.month_total,
             ml.gross_baki,
@@ -2126,6 +2318,24 @@ def _split_carry(nb):
     if nb >= 0:
         return nb, 0.00
     return 0.00, -nb
+
+
+def _recompute_status(cur, tenant_id, billing_month):
+    """Recompute one month's payment_status from stored jama vs generated
+    month_total (same CASE as _sync_ledger_jama). Used to authoritatively drop
+    a 'Settled' mark — e.g. when a settlement is deleted. Clears the estimate
+    flag too (no longer settled at all). Never touches amounts."""
+    cur.execute("""
+        UPDATE rental_core.monthly_ledgers
+        SET payment_status = CASE
+                WHEN jama >= month_total AND month_total > 0 THEN 'Paid'
+                WHEN jama > 0 AND month_total <= 0 THEN 'Paid'
+                WHEN jama > 0 THEN 'Partial'
+                ELSE 'Unpaid'
+            END,
+            settled_estimate = FALSE
+        WHERE tenant_id = %s AND billing_month = %s
+    """, (tenant_id, billing_month))
 
 
 def _sync_ledger_jama(cur, tenant_id, billing_month):
@@ -2163,6 +2373,7 @@ def _sync_ledger_jama(cur, tenant_id, billing_month):
         SET jama = %s,
             jama_date = %s,
             payment_status = CASE
+                WHEN payment_status = 'Settled' THEN 'Settled'
                 WHEN %s >= month_total AND month_total > 0 THEN 'Paid'
                 WHEN %s > 0 AND month_total <= 0 THEN 'Paid'
                 WHEN %s > 0 THEN 'Partial'
@@ -2175,12 +2386,14 @@ def _sync_ledger_jama(cur, tenant_id, billing_month):
     if total_paid <= 0:
         # If no payments remain and the ledger was only a placeholder created by
         # an advance payment (no bills compiled yet), remove it.
+        # Never remove a 'Settled' closing month — the mark is settlement truth.
         cur.execute("""
             DELETE FROM rental_core.monthly_ledgers
             WHERE tenant_id = %s AND billing_month = %s
               AND bhadu_applied = 0 AND light_bill = 0 AND gas_bill = 0
               AND maintenance_applied = 0 AND common_misc_expenses = 0
-              AND jama = 0;
+              AND jama = 0
+              AND payment_status IS DISTINCT FROM 'Settled';
         """, (tenant_id, billing_month))
 
     _cascade_ledger_chain(cur, tenant_id, billing_month)
@@ -2360,6 +2573,17 @@ def delete_payment(payment_id: int):
                     is_active = CASE WHEN %s THEN 'Y' ELSE is_active END
                 WHERE id = %s
             """, (json.dumps(history), fully_reopened, remaining_settled, fully_reopened, fully_reopened, tenant_id))
+            # Undo the chain stamp: every month this settlement had closed shows
+            # true dues again. (The _sync calls above now preserve 'Settled',
+            # so this explicit recompute is the authoritative revert.)
+            _max_bm = max(b['billing_month'] for b in batch_rows)
+            cur.execute("""
+                SELECT billing_month FROM rental_core.monthly_ledgers
+                WHERE tenant_id = %s AND payment_status = 'Settled'
+                  AND billing_month <= %s
+            """, (tenant_id, _max_bm))
+            for _r in cur.fetchall():
+                _recompute_status(cur, tenant_id, _r['billing_month'])
         conn.commit()
         return {"status": "SUCCESS", "deleted_payments": len(batch_rows)}
     except HTTPException:
@@ -2534,7 +2758,7 @@ def update_ledger(ledger_id: int, data: LedgerUpdate):
 
         cur.execute("""
             UPDATE rental_core.monthly_ledgers
-            SET jama = %s, jama_date = %s, payment_status = %s
+            SET jama = %s, jama_date = %s, payment_status = %s, settled_estimate = FALSE
             WHERE id = %s;
         """, (new_jama, new_jama_date, new_status, ledger_id))
         conn.commit()
@@ -2629,7 +2853,8 @@ def update_ledger_manual(ledger_id: int, data: LedgerManualUpdate):
                     WHEN jama > 0 AND month_total <= 0 THEN 'Paid'
                     WHEN jama > 0 THEN 'Partial'
                     ELSE 'Unpaid'
-                END
+                END,
+                settled_estimate = FALSE
             WHERE id = %s
             RETURNING manual_override, payment_status, month_total, gross_baki, new_baki;
         """, (ledger_id,))
@@ -3237,6 +3462,7 @@ def reminders_tenants(billing_month: str = Query(..., pattern=r"^\d{4}-(0[1-9]|1
         LEFT JOIN rental_core.tenant_reminders ar
                ON ar.tenant_id = t.id AND ar.billing_month = %s AND ar.status = 'ACTIVE'
         WHERE ml.billing_month = %s AND t.is_active = 'Y'
+          AND ml.payment_status IS DISTINCT FROM 'Settled'
           AND COALESCE(ml.new_baki, 0.00) > 0
         ORDER BY r.display_address, t.tenant_name;
     """, (billing_month, billing_month))

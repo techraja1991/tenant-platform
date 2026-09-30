@@ -330,6 +330,12 @@ try:
                 )
             )
 
+            # 6b. Estimate true-up: if this closing month was settled while its
+            # utility bills were estimated, compare the just-compiled actuals
+            # against the snapshot; promote to plain Settled on match.
+            from db_config import promote_settled_estimate as _promote
+            _promote(cursor, tenant_pk, billing_month, light_bill, gas_bill)
+
             cursor.execute("RELEASE SAVEPOINT sp_tenant")
             report["success"] += 1
 

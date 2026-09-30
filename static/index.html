@@ -845,6 +845,9 @@
                                 <button @click="openFinalSettlementModal()" class="bg-amber-600 hover:bg-amber-500 text-white px-2.5 py-1.5 rounded-lg font-medium text-xs flex items-center justify-center gap-1" title="Full & Final Settlement">
                                     <i class="fa-solid fa-file-invoice text-base"></i> <span class="hidden sm:inline">Settlement</span>
                                 </button>
+                                <button @click="refreshCustomer()" :disabled="customerRefreshing" class="bg-slate-700 hover:bg-slate-600 disabled:opacity-60 text-white px-2.5 py-1.5 rounded-lg font-medium text-xs flex items-center justify-center gap-1" title="Refresh customer view">
+                                    <i class="fa-solid fa-rotate-right text-base" :class="customerRefreshing && 'animate-spin'"></i> <span class="hidden sm:inline">Refresh</span>
+                                </button>
                             </div>
                         </div>
                         <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4 text-sm">
@@ -896,10 +899,12 @@
                                             <td class="p-3" x-text="'₹' + m.bhadu_applied.toLocaleString('en-IN')"></td>
                                             <td class="p-3">
                                                 <span :class="m.light_bill_manual != null ? 'text-amber-400 font-bold' : ''" x-text="'₹' + Number(m.light_bill).toLocaleString('en-IN')"></span>
+                                                <span x-show="m.estimated_light != null" class="ml-1 px-1 py-0.5 rounded text-[10px] bg-amber-500/20 text-amber-400" title="Estimated value — settlement basis (actual bill not prepared)">est</span>
                                                 <span x-show="m.light_bill_manual != null" class="ml-1 text-[10px] text-slate-500 line-through" x-text="'₹' + Number(m.light_bill_actual).toLocaleString('en-IN')"></span>
                                             </td>
                                             <td class="p-3">
                                                 <span :class="m.gas_bill_manual != null ? 'text-amber-400 font-bold' : ''" x-text="'₹' + Number(m.gas_bill).toLocaleString('en-IN')"></span>
+                                                <span x-show="m.estimated_gas != null" class="ml-1 px-1 py-0.5 rounded text-[10px] bg-amber-500/20 text-amber-400" title="Estimated value — settlement basis (actual bill not prepared)">est</span>
                                                 <span x-show="m.gas_bill_manual != null" class="ml-1 text-[10px] text-slate-500 line-through" x-text="'₹' + Number(m.gas_bill_actual).toLocaleString('en-IN')"></span>
                                             </td>
                                             <td class="p-3">
@@ -914,9 +919,9 @@
                                             <td class="p-3 font-bold text-amber-400" x-text="'₹' + m.gross_baki.toLocaleString('en-IN')"></td>
                                             <td class="p-3 text-emerald-400 font-medium" x-text="'₹' + m.jama.toLocaleString('en-IN')"></td>
                                             <td class="p-3 text-slate-400" x-text="m.payment_dates.join(', ') || '—'"></td>
-                                            <td class="p-3 font-bold text-base" :class="m.new_baki < 0 ? 'text-emerald-400' : 'text-indigo-400'" x-text="(m.new_baki < 0 ? '−₹' : '₹') + Math.abs(m.new_baki).toLocaleString('en-IN')"></td>
+                                            <td class="p-3 font-bold text-base" :class="effBaki(m) < 0 ? 'text-emerald-400' : (m.payment_status === 'Settled' ? 'text-slate-400' : 'text-indigo-400')" x-text="(effBaki(m) < 0 ? '−₹' : '₹') + Math.abs(effBaki(m)).toLocaleString('en-IN')"></td>
                                             <td class="p-3">
-                                                <span class="px-2 py-0.5 rounded text-xs font-bold" :class="m.payment_status === 'Paid' ? 'bg-emerald-500/20 text-emerald-400' : (m.payment_status === 'Partial' ? 'bg-amber-500/20 text-amber-400' : (m.payment_status === 'Not Billed' ? 'bg-slate-500/20 text-slate-400' : 'bg-rose-500/20 text-rose-400'))" x-text="m.payment_status"></span>
+                                                <span class="px-2 py-0.5 rounded text-xs font-bold" :class="(m.payment_status === 'Paid' || m.payment_status === 'Settled') ? 'bg-emerald-500/20 text-emerald-400' : (m.payment_status === 'Partial' ? 'bg-amber-500/20 text-amber-400' : (m.payment_status === 'Not Billed' ? 'bg-slate-500/20 text-slate-400' : 'bg-rose-500/20 text-rose-400'))" x-text="settleLabel(m)"></span>
                                             </td>
                                         </tr>
                                     </template>
@@ -1005,7 +1010,7 @@
                                     <div class="text-xs text-slate-400 truncate" x-text="ledger.tenant_name"></div>
                                     <div class="text-[10px] text-slate-600 truncate" x-text="ledger.apartment_name || ''"></div>
                                 </div>
-                                <span class="px-2 py-1 rounded-full text-[10px] font-bold shrink-0" :class="ledger.payment_status === 'Paid' ? 'bg-emerald-500/20 text-emerald-400' : (ledger.payment_status === 'Partial' ? 'bg-amber-500/20 text-amber-400' : 'bg-rose-500/20 text-rose-400')" x-text="ledger.payment_status"></span>
+                                <span class="px-2 py-1 rounded-full text-[10px] font-bold shrink-0" :class="(ledger.payment_status === 'Paid' || ledger.payment_status === 'Settled') ? 'bg-emerald-500/20 text-emerald-400' : (ledger.payment_status === 'Partial' ? 'bg-amber-500/20 text-amber-400' : 'bg-rose-500/20 text-rose-400')" x-text="settleLabel(ledger)"></span>
                             </div>
                             <div class="p-4 space-y-2 text-sm">
                                 <div class="flex justify-between"><span class="text-slate-400">Previous Month Net (Debt / Credit)</span><span :class="Number(ledger.prev_baki) - Number(ledger.prev_jama) < 0 ? 'text-emerald-400' : 'text-rose-400'" x-text="(Number(ledger.prev_baki) - Number(ledger.prev_jama) < 0 ? '−₹' : '₹') + Math.abs(Number(ledger.prev_baki) - Number(ledger.prev_jama)).toLocaleString('en-IN')"></span></div>
@@ -1016,7 +1021,7 @@
                                 <div class="flex justify-between"><span class="text-slate-400">Misc <span x-show="ledger.common_misc_manual != null" class="ml-1 px-1.5 py-0.5 rounded text-[10px] bg-amber-500/20 text-amber-400">Manual</span></span><span><span x-show="ledger.common_misc_manual != null" class="text-xs text-slate-500 line-through mr-1" x-text="'₹' + Number(ledger.common_misc_actual ?? ledger.common_misc_expenses).toLocaleString('en-IN')"></span><span :class="ledger.common_misc_manual != null ? 'text-amber-400 font-bold' : ''" x-text="'₹' + Number(ledger.common_misc_manual ?? ledger.common_misc_expenses).toLocaleString('en-IN')"></span></span></div>
                                 <div class="flex justify-between border-t border-slate-800 pt-2"><span class="font-medium text-amber-400">Fixed Total Baki</span><span class="font-bold text-amber-400" x-text="'₹' + ledger.gross_baki"></span></div>
                                 <div class="flex justify-between"><span class="text-slate-400">Paid (jama)</span><span class="font-medium text-emerald-400" x-text="'₹' + ledger.jama"></span></div>
-                                <div class="flex justify-between border-t border-slate-800 pt-2"><span class="font-medium">Current Baki</span><span class="font-bold text-base" :class="ledger.new_baki < 0 ? 'text-emerald-400' : 'text-indigo-400'" x-text="(ledger.new_baki < 0 ? '−₹' : '₹') + Math.abs(ledger.new_baki).toLocaleString('en-IN')"></span></div>
+                                <div class="flex justify-between border-t border-slate-800 pt-2"><span class="font-medium">Current Baki</span><span class="font-bold text-base" :class="effBaki(ledger) < 0 ? 'text-emerald-400' : (ledger.payment_status === 'Settled' ? 'text-slate-400' : 'text-indigo-400')" x-text="(effBaki(ledger) < 0 ? '−₹' : '₹') + Math.abs(effBaki(ledger)).toLocaleString('en-IN')"></span></div>
                             </div>
                             <div class="flex items-center justify-between border-t border-slate-800 bg-slate-800/30 px-4 py-3">
                                 <div class="flex items-center gap-3">
@@ -1059,9 +1064,9 @@
                                         <td class="p-3"><span :class="ledger.common_misc_manual != null ? 'text-amber-400 font-bold' : ''" x-text="'₹' + Number(ledger.common_misc_manual ?? ledger.common_misc_expenses).toLocaleString('en-IN')"></span><span x-show="ledger.common_misc_manual != null" class="ml-1 px-1 py-0.5 rounded text-[10px] bg-amber-500/20 text-amber-400" title="Manual override" x-text="'↳ actual ₹' + Number(ledger.common_misc_actual).toLocaleString('en-IN')"></span></td>
                                         <td class="p-3 font-bold text-amber-400" x-text="'₹' + ledger.gross_baki"></td>
                                         <td class="p-3 text-emerald-400 font-medium" x-text="'₹' + ledger.jama"></td>
-                                        <td class="p-3 font-bold text-base" :class="ledger.new_baki < 0 ? 'text-emerald-400' : 'text-indigo-400'" x-text="(ledger.new_baki < 0 ? '−₹' : '₹') + Math.abs(ledger.new_baki).toLocaleString('en-IN')"></td>
+                                        <td class="p-3 font-bold text-base" :class="effBaki(ledger) < 0 ? 'text-emerald-400' : (ledger.payment_status === 'Settled' ? 'text-slate-400' : 'text-indigo-400')" x-text="(effBaki(ledger) < 0 ? '−₹' : '₹') + Math.abs(effBaki(ledger)).toLocaleString('en-IN')"></td>
                                         <td class="p-3">
-                                            <span class="px-2 py-0.5 rounded text-xs font-bold" :class="ledger.payment_status === 'Paid' ? 'bg-emerald-500/20 text-emerald-400' : (ledger.payment_status === 'Partial' ? 'bg-amber-500/20 text-amber-400' : 'bg-rose-500/20 text-rose-400')" x-text="ledger.payment_status"></span>
+                                            <span class="px-2 py-0.5 rounded text-xs font-bold" :class="(ledger.payment_status === 'Paid' || ledger.payment_status === 'Settled') ? 'bg-emerald-500/20 text-emerald-400' : (ledger.payment_status === 'Partial' ? 'bg-amber-500/20 text-amber-400' : 'bg-rose-500/20 text-rose-400')" x-text="settleLabel(ledger)"></span>
                                         </td>
                                         <td class="p-3 whitespace-nowrap">
                                             <button @click.stop="openCustomerFromLedger(ledger)" class="text-cyan-400 hover:text-cyan-300 mr-2" title="Open customer view"><i class="fa-solid fa-user"></i></button>
@@ -1086,12 +1091,12 @@
                                     <div class="font-bold" x-text="ledger.display_address"></div>
                                     <div class="text-xs text-slate-400 truncate" x-text="ledger.tenant_name"></div>
                                 </div>
-                                <span class="px-2 py-1 rounded-full text-[10px] font-bold shrink-0" :class="ledger.payment_status === 'Paid' ? 'bg-emerald-500/20 text-emerald-400' : (ledger.payment_status === 'Partial' ? 'bg-amber-500/20 text-amber-400' : 'bg-rose-500/20 text-rose-400')" x-text="ledger.payment_status"></span>
+                                <span class="px-2 py-1 rounded-full text-[10px] font-bold shrink-0" :class="(ledger.payment_status === 'Paid' || ledger.payment_status === 'Settled') ? 'bg-emerald-500/20 text-emerald-400' : (ledger.payment_status === 'Partial' ? 'bg-amber-500/20 text-amber-400' : 'bg-rose-500/20 text-rose-400')" x-text="settleLabel(ledger)"></span>
                             </div>
                             <div class="p-4 space-y-2 text-sm">
                                 <div class="flex justify-between"><span class="text-slate-400">Fixed Total Baki</span><span class="font-bold text-amber-400" x-text="'₹' + ledger.gross_baki"></span></div>
                                 <div class="flex justify-between"><span class="text-slate-400">Paid (jama)</span><span class="font-medium text-emerald-400" x-text="'₹' + ledger.jama"></span></div>
-                                <div class="flex justify-between border-t border-slate-800 pt-2"><span class="font-medium">Current Baki</span><span class="font-bold text-base" :class="ledger.new_baki < 0 ? 'text-emerald-400' : 'text-indigo-400'" x-text="(ledger.new_baki < 0 ? '−₹' : '₹') + Math.abs(ledger.new_baki).toLocaleString('en-IN')"></span></div>
+                                <div class="flex justify-between border-t border-slate-800 pt-2"><span class="font-medium">Current Baki</span><span class="font-bold text-base" :class="effBaki(ledger) < 0 ? 'text-emerald-400' : (ledger.payment_status === 'Settled' ? 'text-slate-400' : 'text-indigo-400')" x-text="(effBaki(ledger) < 0 ? '−₹' : '₹') + Math.abs(effBaki(ledger)).toLocaleString('en-IN')"></span></div>
                             </div>
                             <div class="flex items-center justify-between border-t border-slate-800 bg-slate-800/30 px-4 py-3">
                                 <div class="flex items-center gap-3">
@@ -1127,9 +1132,9 @@
                                         <td class="p-3" x-text="ledger.tenant_name"></td>
                                         <td class="p-3 font-bold text-amber-400" x-text="'₹' + ledger.gross_baki"></td>
                                         <td class="p-3 text-emerald-400 font-medium" x-text="'₹' + ledger.jama"></td>
-                                        <td class="p-3 font-bold text-base" :class="ledger.new_baki < 0 ? 'text-emerald-400' : 'text-indigo-400'" x-text="(ledger.new_baki < 0 ? '−₹' : '₹') + Math.abs(ledger.new_baki).toLocaleString('en-IN')"></td>
+                                        <td class="p-3 font-bold text-base" :class="effBaki(ledger) < 0 ? 'text-emerald-400' : (ledger.payment_status === 'Settled' ? 'text-slate-400' : 'text-indigo-400')" x-text="(effBaki(ledger) < 0 ? '−₹' : '₹') + Math.abs(effBaki(ledger)).toLocaleString('en-IN')"></td>
                                         <td class="p-3">
-                                            <span class="px-2 py-0.5 rounded text-xs font-bold" :class="ledger.payment_status === 'Paid' ? 'bg-emerald-500/20 text-emerald-400' : (ledger.payment_status === 'Partial' ? 'bg-amber-500/20 text-amber-400' : 'bg-rose-500/20 text-rose-400')" x-text="ledger.payment_status"></span>
+                                            <span class="px-2 py-0.5 rounded text-xs font-bold" :class="(ledger.payment_status === 'Paid' || ledger.payment_status === 'Settled') ? 'bg-emerald-500/20 text-emerald-400' : (ledger.payment_status === 'Partial' ? 'bg-amber-500/20 text-amber-400' : 'bg-rose-500/20 text-rose-400')" x-text="settleLabel(ledger)"></span>
                                         </td>
                                         <td class="p-3 whitespace-nowrap">
                                             <button @click.stop="openCustomerFromLedger(ledger)" class="text-cyan-400 hover:text-cyan-300 mr-2" title="Open customer view"><i class="fa-solid fa-user"></i></button>
@@ -2065,6 +2070,27 @@
             <div class="flex items-center justify-between"><h2 class="text-xl font-bold">Month Details — <span x-text="customerMonth.billing_month ? formatMonth(customerMonth.billing_month) : ''"></span></h2><button @click="showCustomerMonthModal = false" class="text-slate-400 text-xl"><i class="fa-solid fa-xmark"></i></button></div>
             <div class="text-sm text-slate-400" x-text="customerDetail && customerDetail.tenant ? (customerDetail.tenant.tenant_name + ' — ' + customerDetail.tenant.display_address) : ''"></div>
 
+            <template x-if="customerMonth.settlement_summary">
+                <div class="bg-emerald-900/20 rounded-lg p-3 border border-emerald-700">
+                    <div class="text-xs font-bold text-emerald-400 uppercase tracking-wide mb-2">Final Settlement — this month</div>
+                    <div class="space-y-1 text-sm">
+                        <template x-for="e in customerMonth.settlement_summary.entries" :key="e.payment_type + e.amount + e.payment_date">
+                            <div class="flex flex-wrap items-center gap-2">
+                                <span class="px-2 py-0.5 rounded text-xs font-bold" :class="e.payment_type === 'SETTLEMENT' ? 'bg-indigo-500/20 text-indigo-300' : 'bg-amber-500/20 text-amber-300'" x-text="e.payment_type"></span>
+                                <span class="font-bold" x-text="'₹' + Number(e.amount).toLocaleString('en-IN')"></span>
+                                <span class="text-slate-400 text-xs" x-text="e.payment_date + ' · ' + (e.payment_mode || '')"></span>
+                                <span class="text-slate-500 text-xs truncate" x-text="e.note || ''"></span>
+                            </div>
+                        </template>
+                    </div>
+                    <div class="text-xs mt-2">
+                        <span x-show="customerMonth.settlement_summary.settled_amount > 0" class="text-indigo-300 mr-3" x-text="'Collected ₹' + Number(customerMonth.settlement_summary.settled_amount).toLocaleString('en-IN')"></span>
+                        <span x-show="customerMonth.settlement_summary.refunded_amount > 0" class="text-amber-300 mr-3" x-text="'Refunded ₹' + Number(customerMonth.settlement_summary.refunded_amount).toLocaleString('en-IN')"></span>
+                    </div>
+                    <div x-show="customerMonth.settlement_summary.on_estimates" class="text-[11px] text-amber-400 mt-1" x-text="'Settled on estimates' + (customerMonth.settlement_summary.est_light != null ? ' — Light est ₹' + Number(customerMonth.settlement_summary.est_light).toLocaleString('en-IN') : '') + (customerMonth.settlement_summary.est_gas != null ? ', Gas est ₹' + Number(customerMonth.settlement_summary.est_gas).toLocaleString('en-IN') : '')"></div>
+                </div>
+            </template>
+
             <div>
                 <h3 class="text-lg font-bold text-emerald-400 mb-2">Payment Transactions</h3>
                 <p class="text-[11px] text-slate-500 mb-2"><i class="fa-solid fa-pen text-indigo-400 mr-1"></i>Click on amount to edit payment</p>
@@ -2104,14 +2130,14 @@
                     <div class="bg-slate-900 rounded p-2"><div class="text-slate-500">Bhadu (Rent)</div><div class="font-bold" x-text="'₹' + Number(customerMonth.bhadu_applied || 0).toLocaleString('en-IN')"></div></div>
                     <div class="bg-slate-900 rounded p-2"><div class="text-slate-500">Prev Baki / Jama</div><div class="font-bold" x-text="'₹' + Number(customerMonth.prev_baki||0).toLocaleString('en-IN') + ' / ₹' + Number(customerMonth.prev_jama||0).toLocaleString('en-IN')"></div></div>
                     <div class="bg-slate-900 rounded p-2"><div class="text-slate-500">Month Total</div><div class="font-bold text-sky-400" x-text="'₹' + Number(customerMonth.month_total||0).toLocaleString('en-IN')"></div></div>
-                    <div class="bg-slate-900 rounded p-2"><div class="text-slate-500">New Baki</div><div class="font-bold" :class="(customerMonth.new_baki||0)<0?'text-emerald-400':'text-rose-400'" x-text="'₹' + Number(customerMonth.new_baki||0).toLocaleString('en-IN')"></div></div>
+                    <div class="bg-slate-900 rounded p-2"><div class="text-slate-500">New Baki</div><div class="font-bold" :class="effBaki(customerMonth)<0?'text-emerald-400':(customerMonth.payment_status==='Settled'?'text-slate-400':'text-rose-400')" x-text="'₹' + Number(effBaki(customerMonth)).toLocaleString('en-IN')"></div></div>
                 </div>
                 <div class="overflow-x-auto">
                     <table class="w-full text-xs border-collapse">
                         <thead class="text-slate-500"><tr><th class="p-2 text-left">Bill</th><th class="p-2 text-right">Actual</th><th class="p-2 text-right">Manual</th><th class="p-2 text-right">Effective</th></tr></thead>
                         <tbody class="divide-y divide-slate-700">
-                            <tr><td class="p-2">Light Bill</td><td class="p-2 text-right" :class="customerMonth.light_bill_actual == null ? 'text-slate-500' : ''" x-text="customerMonth.light_bill_actual != null ? '₹' + Number(customerMonth.light_bill_actual).toLocaleString('en-IN') : '—'"></td><td class="p-2 text-right" :class="customerMonth.light_bill_manual != null ? 'text-amber-400 font-bold' : 'text-slate-500'" x-text="customerMonth.light_bill_manual != null ? '₹' + Number(customerMonth.light_bill_manual).toLocaleString('en-IN') : '—'"></td><td class="p-2 text-right font-bold" :class="customerMonth.light_bill_manual != null ? 'text-amber-400' : ''" x-text="'₹' + Number(customerMonth.light_bill ?? 0).toLocaleString('en-IN')"></td></tr>
-                            <tr><td class="p-2">Gas Bill</td><td class="p-2 text-right" :class="customerMonth.gas_bill_actual == null ? 'text-slate-500' : ''" x-text="customerMonth.gas_bill_actual != null ? '₹' + Number(customerMonth.gas_bill_actual).toLocaleString('en-IN') : '—'"></td><td class="p-2 text-right" :class="customerMonth.gas_bill_manual != null ? 'text-amber-400 font-bold' : 'text-slate-500'" x-text="customerMonth.gas_bill_manual != null ? '₹' + Number(customerMonth.gas_bill_manual).toLocaleString('en-IN') : '—'"></td><td class="p-2 text-right font-bold" :class="customerMonth.gas_bill_manual != null ? 'text-amber-400' : ''" x-text="'₹' + Number(customerMonth.gas_bill ?? 0).toLocaleString('en-IN')"></td></tr>
+                            <tr><td class="p-2">Light Bill</td><td class="p-2 text-right" :class="customerMonth.light_bill_actual == null ? 'text-slate-500' : ''" x-text="customerMonth.light_bill_actual != null ? '₹' + Number(customerMonth.light_bill_actual).toLocaleString('en-IN') : '—'"></td><td class="p-2 text-right" :class="customerMonth.light_bill_manual != null ? 'text-amber-400 font-bold' : 'text-slate-500'" x-text="customerMonth.light_bill_manual != null ? '₹' + Number(customerMonth.light_bill_manual).toLocaleString('en-IN') : '—'"></td><td class="p-2 text-right font-bold" :class="customerMonth.light_bill_manual != null ? 'text-amber-400' : ''"><span x-text="'₹' + Number(customerMonth.light_bill ?? 0).toLocaleString('en-IN')"></span><span x-show="customerMonth.estimated_light != null" class="ml-1 px-1 py-0.5 rounded text-[10px] bg-amber-500/20 text-amber-400 font-normal" title="Estimated value — settlement basis">est</span></td></tr>
+                            <tr><td class="p-2">Gas Bill</td><td class="p-2 text-right" :class="customerMonth.gas_bill_actual == null ? 'text-slate-500' : ''" x-text="customerMonth.gas_bill_actual != null ? '₹' + Number(customerMonth.gas_bill_actual).toLocaleString('en-IN') : '—'"></td><td class="p-2 text-right" :class="customerMonth.gas_bill_manual != null ? 'text-amber-400 font-bold' : 'text-slate-500'" x-text="customerMonth.gas_bill_manual != null ? '₹' + Number(customerMonth.gas_bill_manual).toLocaleString('en-IN') : '—'"></td><td class="p-2 text-right font-bold" :class="customerMonth.gas_bill_manual != null ? 'text-amber-400' : ''"><span x-text="'₹' + Number(customerMonth.gas_bill ?? 0).toLocaleString('en-IN')"></span><span x-show="customerMonth.estimated_gas != null" class="ml-1 px-1 py-0.5 rounded text-[10px] bg-amber-500/20 text-amber-400 font-normal" title="Estimated value — settlement basis">est</span></td></tr>
                             <tr><td class="p-2">Maintenance</td><td class="p-2 text-right" :class="customerMonth.maintenance_actual == null ? 'text-slate-500' : ''" x-text="customerMonth.maintenance_actual != null ? '₹' + Number(customerMonth.maintenance_actual).toLocaleString('en-IN') : '—'"></td><td class="p-2 text-right" :class="customerMonth.maintenance_manual != null ? 'text-amber-400 font-bold' : 'text-slate-500'" x-text="customerMonth.maintenance_manual != null ? '₹' + Number(customerMonth.maintenance_manual).toLocaleString('en-IN') : '—'"></td><td class="p-2 text-right font-bold" :class="customerMonth.maintenance_manual != null ? 'text-amber-400' : ''" x-text="'₹' + Number(customerMonth.maintenance_applied ?? 0).toLocaleString('en-IN')"></td></tr>
                             <tr><td class="p-2">Common Misc</td><td class="p-2 text-right" :class="customerMonth.common_misc_actual == null ? 'text-slate-500' : ''" x-text="customerMonth.common_misc_actual != null ? '₹' + Number(customerMonth.common_misc_actual).toLocaleString('en-IN') : '—'"></td><td class="p-2 text-right" :class="customerMonth.common_misc_manual != null ? 'text-amber-400 font-bold' : 'text-slate-500'" x-text="customerMonth.common_misc_manual != null ? '₹' + Number(customerMonth.common_misc_manual).toLocaleString('en-IN') : '—'"></td><td class="p-2 text-right font-bold" :class="customerMonth.common_misc_manual != null ? 'text-amber-400' : ''" x-text="'₹' + Number(customerMonth.common_misc_expenses ?? 0).toLocaleString('en-IN')"></td></tr>
                         </tbody>
@@ -2121,8 +2147,8 @@
                 <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm pt-2 border-t border-slate-700">
                     <div><div class="text-slate-400 text-xs">Gross Total</div><div class="font-bold text-amber-400" x-text="'₹' + Number(customerMonth.gross_baki || 0).toLocaleString('en-IN')"></div></div>
                     <div><div class="text-slate-400 text-xs">Received</div><div class="font-bold text-emerald-400" x-text="'₹' + Number(customerMonth.jama || 0).toLocaleString('en-IN')"></div></div>
-                    <div><div class="text-slate-400 text-xs">Outstanding</div><div class="font-bold" :class="(customerMonth.new_baki || 0) < 0 ? 'text-emerald-400' : 'text-indigo-400'" x-text="'₹' + Number(customerMonth.new_baki || 0).toLocaleString('en-IN')"></div></div>
-                    <div><div class="text-slate-400 text-xs">Status</div><div class="font-bold" x-text="customerMonth.payment_status"></div></div>
+                    <div><div class="text-slate-400 text-xs">Outstanding</div><div class="font-bold" :class="effBaki(customerMonth) < 0 ? 'text-emerald-400' : (customerMonth.payment_status === 'Settled' ? 'text-slate-400' : 'text-indigo-400')" x-text="'₹' + Number(effBaki(customerMonth)).toLocaleString('en-IN')"></div></div>
+                    <div><div class="text-slate-400 text-xs">Status</div><div class="font-bold" x-text="settleLabel(customerMonth)"></div></div>
                 </div>
             </div>
 
@@ -2255,11 +2281,19 @@
                         <div class="text-xs text-slate-400 mt-1" x-show="finalSettlementData.settlement.is_receivable" x-text="'Outstanding ₹' + Number(finalSettlementData.settlement.outstanding).toLocaleString('en-IN') + ' − Deposit ₹' + Number(finalSettlementData.deposit.received).toLocaleString('en-IN')"></div>
                         <div class="text-xs text-slate-400 mt-1" x-show="finalSettlementData.settlement.is_payable && finalSettlementData.settlement.outstanding > 0" x-text="'Deposit ₹' + Number(finalSettlementData.deposit.received).toLocaleString('en-IN') + ' − Outstanding ₹' + Number(finalSettlementData.settlement.outstanding).toLocaleString('en-IN')"></div>
                         <div class="text-xs text-slate-400 mt-1" x-show="finalSettlementData.settlement.outstanding <= 0" x-text="'Deposit refund + credit: ₹' + Number(finalSettlementData.settlement.payable_to_tenant).toLocaleString('en-IN')"></div>
-                        <div class="text-xs text-slate-500 mt-2" x-show="finalSettlementData.ledger.estimated_light != null || finalSettlementData.ledger.estimated_gas != null">* Electricity/Gas estimated as max of last 4 months (bill not yet generated)</div>
+                        <div class="text-xs text-slate-500 mt-2" x-show="finalSettlementData.ledger.estimated_light != null || finalSettlementData.ledger.estimated_gas != null">* Electricity/Gas estimated as max of last 6 months (bill not yet generated)</div>
                     </div>
                     <div class="bg-slate-800/50 rounded-lg p-3 border border-slate-700">
                         <div class="text-xs font-bold text-slate-400 uppercase tracking-wide mb-2"><i class="fa-brands fa-whatsapp text-green-400 mr-1"></i>WhatsApp Preview — Final Settlement</div>
                         <pre class="whitespace-pre-wrap text-xs text-slate-300 leading-relaxed bg-slate-900 rounded p-3 border border-slate-800 max-h-48 overflow-y-auto" x-text="finalSettlementData.whatsapp_message"></pre>
+                    </div>
+                    <div class="bg-amber-900/20 rounded-lg p-3 border border-amber-700" x-show="finalSettlementData && finalSettlementData.estimate_trueup">
+                        <div class="text-xs font-bold text-amber-400 uppercase tracking-wide mb-2">Estimate True-up — settled before actual bills arrived</div>
+                        <div class="text-xs text-slate-300 space-y-1">
+                            <div x-show="finalSettlementData.estimate_trueup.est_light != null"><span class="text-slate-400">Light: est ₹<span x-text="Number(finalSettlementData.estimate_trueup.est_light).toLocaleString('en-IN')"></span></span><span x-show="finalSettlementData.estimate_trueup.actuals_arrived"> → actual ₹<span x-text="Number(finalSettlementData.estimate_trueup.actual_light).toLocaleString('en-IN')"></span> (<span x-text="(finalSettlementData.estimate_trueup.var_light >= 0 ? '+' : '') + Number(finalSettlementData.estimate_trueup.var_light).toLocaleString('en-IN')"></span>)</span><span x-show="!finalSettlementData.estimate_trueup.actuals_arrived" class="text-amber-400"> · actual bill pending</span></div>
+                            <div x-show="finalSettlementData.estimate_trueup.est_gas != null"><span class="text-slate-400">Gas: est ₹<span x-text="Number(finalSettlementData.estimate_trueup.est_gas).toLocaleString('en-IN')"></span></span><span x-show="finalSettlementData.estimate_trueup.actuals_arrived"> → actual ₹<span x-text="Number(finalSettlementData.estimate_trueup.actual_gas).toLocaleString('en-IN')"></span> (<span x-text="(finalSettlementData.estimate_trueup.var_gas >= 0 ? '+' : '') + Number(finalSettlementData.estimate_trueup.var_gas).toLocaleString('en-IN')"></span>)</span><span x-show="!finalSettlementData.estimate_trueup.actuals_arrived" class="text-amber-400"> · actual bill pending</span></div>
+                            <div x-show="finalSettlementData.estimate_trueup.actuals_arrived" class="font-bold" :class="finalSettlementData.estimate_trueup.matches ? 'text-emerald-400' : 'text-amber-400'" x-text="finalSettlementData.estimate_trueup.matches ? '✓ Actuals match estimates — fully settled' : 'Residual vs estimates: ₹' + Number(finalSettlementData.estimate_trueup.variance_total).toLocaleString('en-IN')"></div>
+                        </div>
                     </div>
                     <div class="bg-slate-800 rounded-lg p-3 border border-slate-700 space-y-3" x-show="finalSettlementData && !finalSettlementLoading">
                         <h3 class="text-sm font-bold text-slate-200">Record Settlement</h3>
@@ -2452,7 +2486,7 @@
                     </div>
                     <div class="flex items-center justify-between text-xs text-slate-400">
                         <span x-text="sortedOutstandingLedgers.length + ' tenants pending'"></span>
-                        <span x-show="kpiOutstandingSearch" class="text-indigo-400" x-text="'filtered from ' + kpiData.ledgers.filter(x => x.new_baki > 0).length"></span>
+                        <span x-show="kpiOutstandingSearch" class="text-indigo-400" x-text="'filtered from ' + kpiData.ledgers.filter(x => x.new_baki > 0 && x.payment_status !== 'Settled').length"></span>
                     </div>
                     <template x-for="l in sortedOutstandingLedgers" :key="l.tenant_id">
                         <div class="bg-slate-800/40 rounded-lg border border-slate-800 p-3 cursor-pointer hover:border-indigo-500/60 transition" @click="kpiRecordPayment(l)" title="Record payment">
@@ -2463,7 +2497,7 @@
                                 </div>
                                 <div class="text-right shrink-0">
                                     <div class="font-bold text-rose-400" x-text="'₹' + Number(l.new_baki).toLocaleString('en-IN')"></div>
-                                    <span class="px-2 py-0.5 rounded text-[10px] font-bold inline-block mt-0.5" :class="l.payment_status === 'Paid' ? 'bg-emerald-500/20 text-emerald-400' : l.payment_status === 'Partial' ? 'bg-amber-500/20 text-amber-400' : 'bg-rose-500/20 text-rose-400'" x-text="l.payment_status"></span>
+                                    <span class="px-2 py-0.5 rounded text-[10px] font-bold inline-block mt-0.5" :class="(l.payment_status === 'Paid' || l.payment_status === 'Settled') ? 'bg-emerald-500/20 text-emerald-400' : l.payment_status === 'Partial' ? 'bg-amber-500/20 text-amber-400' : 'bg-rose-500/20 text-rose-400'" x-text="settleLabel(l)"></span>
                                 </div>
                             </div>
                             <div class="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-[11px] text-slate-400 border-t border-slate-800 pt-2 items-center">
@@ -2505,7 +2539,7 @@
                                 <span>Maint: <b class="text-slate-300" x-text="'₹' + Number(l.maintenance_applied).toLocaleString('en-IN')"></b></span>
                                 <span>Misc: <b class="text-slate-300" x-text="'₹' + Number(l.common_misc_expenses).toLocaleString('en-IN')"></b></span>
                                 <span class="ml-auto flex gap-2 text-sm">
-                                    <button x-show="l.new_baki > 0" @click.stop="kpiRecordPayment(l)" class="text-indigo-400 hover:text-indigo-300 p-2 rounded-lg bg-indigo-500/10 min-w-[40px] min-h-[40px] flex items-center justify-center" title="Record payment"><i class="fa-solid fa-hand-holding-dollar text-lg"></i></button>
+                                    <button x-show="l.new_baki > 0 && l.payment_status !== 'Settled'" @click.stop="kpiRecordPayment(l)" class="text-indigo-400 hover:text-indigo-300 p-2 rounded-lg bg-indigo-500/10 min-w-[40px] min-h-[40px] flex items-center justify-center" title="Record payment"><i class="fa-solid fa-hand-holding-dollar text-lg"></i></button>
                                     <button @click.stop="kpiOpenCustomer(l)" class="text-cyan-400 hover:text-cyan-300 p-2 rounded-lg bg-cyan-500/10 min-w-[40px] min-h-[40px] flex items-center justify-center" title="Customer view"><i class="fa-solid fa-user text-lg"></i></button>
                                 </span>
                             </div>
@@ -2547,9 +2581,9 @@
                             <div class="flex items-center gap-2 shrink-0">
                                 <div class="text-right">
                                     <div class="font-bold text-emerald-400" x-text="'₹' + Number(l.jama).toLocaleString('en-IN')"></div>
-                                    <div x-show="l.new_baki > 0" class="text-xs text-rose-400" x-text="'Pending: ₹' + Number(l.new_baki).toLocaleString('en-IN')"></div>
+                                    <div x-show="l.new_baki > 0 && l.payment_status !== 'Settled'" class="text-xs text-rose-400" x-text="'Pending: ₹' + Number(l.new_baki).toLocaleString('en-IN')"></div>
                                 </div>
-                                <button x-show="l.new_baki > 0" @click.stop="kpiRecordPayment(l)" class="text-indigo-400 hover:text-indigo-300 p-2 rounded-lg bg-indigo-500/10 min-w-[40px] min-h-[40px] flex items-center justify-center" title="Record payment"><i class="fa-solid fa-hand-holding-dollar text-lg"></i></button>
+                                <button x-show="l.new_baki > 0 && l.payment_status !== 'Settled'" @click.stop="kpiRecordPayment(l)" class="text-indigo-400 hover:text-indigo-300 p-2 rounded-lg bg-indigo-500/10 min-w-[40px] min-h-[40px] flex items-center justify-center" title="Record payment"><i class="fa-solid fa-hand-holding-dollar text-lg"></i></button>
                             </div>
                         </div>
                     </template>
@@ -3375,7 +3409,7 @@
                 },
                 get sortedOutstandingLedgers() {
                     if (!this.kpiData || !this.kpiData.ledgers) return [];
-                    let filtered = this.kpiData.ledgers.filter(x => x.new_baki > 0);
+                    let filtered = this.kpiData.ledgers.filter(x => x.new_baki > 0 && x.payment_status !== 'Settled');
                     const q = (this.kpiOutstandingSearch || '').trim().toLowerCase();
                     if (q) {
                         filtered = filtered.filter(l =>
@@ -3480,6 +3514,7 @@
                 customerYear: new Date().getFullYear(),
                 customerDetail: null,
                 customerMonth: {},
+                customerRefreshing: false,
                 netLoading: {},
                 netError: {},
                 depositSearch: '',
@@ -4173,6 +4208,19 @@
                 dismissToast(id) {
                     this.toasts = this.toasts.filter(t => t.id !== id);
                 },
+                // Effective BAKI: a Settled closing month is closed (dues covered
+                // by the settlement), so it contributes ₹0 wherever dues display
+                // or totals are computed. Raw new_baki stays the ledger truth.
+                effBaki(r) {
+                    if (r && r.payment_status === 'Settled') return 0;
+                    return Number((r && r.new_baki) || 0);
+                },
+                // Badge label: 'Settled (Est.)' when closed on estimated bills.
+                settleLabel(r) {
+                    if (!r) return '';
+                    return r.payment_status === 'Settled' && r.settled_estimate
+                        ? 'Settled (Est.)' : (r.payment_status || '');
+                },
 totalTenantPages() {
                     return Math.ceil(this.filteredTenants.length / this.itemsPerPage) || 1;
                 },
@@ -4454,6 +4502,25 @@ totalTenantPages() {
                     if (!this.customerSel) return;
                     const res = await fetch(`/api/tenants/${this.customerSel}/year_ledger?year=${this.customerYear}`);
                     this.customerDetail = await res.json();
+                },
+                async refreshCustomer() {
+                    if (!this.customerSel || this.customerRefreshing) return;
+                    this.customerRefreshing = true;
+                    try {
+                        const res = await fetch(`/api/tenants/${this.customerSel}/year_ledger?year=${this.customerYear}`);
+                        if (!res.ok) throw new Error('Refresh failed');
+                        this.customerDetail = await res.json();
+                        // Re-point the open month popup to the fresh month object, if any
+                        if (this.customerMonth && this.customerMonth.billing_month) {
+                            const fresh = (this.customerDetail.months || []).find(m => m.billing_month === this.customerMonth.billing_month);
+                            if (fresh) this.customerMonth = fresh;
+                        }
+                        this.toast('Customer view refreshed', 'success');
+                    } catch(e) {
+                        this.toast(e.message || 'Refresh failed', 'error');
+                    } finally {
+                        this.customerRefreshing = false;
+                    }
                 },
                 openCustomerMonth(m) {
                     this.customerMonth = m;
