@@ -41,7 +41,7 @@ QR_IMAGE = os.path.join(BASE_DIR, "static", "whatsapp_qr.png")        # full log
 QR_CLEAN = os.path.join(BASE_DIR, "static", "whatsapp_qr_clean.png")  # padded QR only
 
 DEFAULT_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-              "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+              "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36")
 
 # WhatsApp Web DOM markers
 SELECTOR_CHAT_LIST = 'div[data-testid="chat-list"], div[id="pane-side"]'

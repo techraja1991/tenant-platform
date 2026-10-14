@@ -68,6 +68,10 @@ _HEADED = False
 MAX_ATTEMPTS = 2          # total attempts per (reminder_id, send_type)
 VERIFY_FAST_MS = 30000
 VERIFY_SCHED_MS = 60000
+# Single grey tick: the message left our device but has not reached the
+# recipient's yet. Recorded as SENT with this warning (not an error).
+_SEND_WARNING = ("Sent from our end (single tick) — "
+                 "not yet delivered to recipient")
 
 # ---------------------------------------------------------------------------
 # Single-source-of-truth delivery probe
@@ -95,39 +99,64 @@ _WA_STATUS_PROBE_JS = r"""
     return mine || null;
   }
 
+  // The delivery-tick node lives in the msg-meta footer. Scope every lookup
+  // there first (falling back to the whole bubble) so decorative SVGs in the
+  // bubble body (e.g. the tail-out corner) can never shadow the tick marker.
+  function scopesFor(mine) {
+    const meta = mine.querySelector('[data-testid="msg-meta"], [data-testid="msg-status"]');
+    return meta ? [meta, mine] : [mine];
+  }
+
   function status(snip) {
     const mine = findRow(snip);
     if (!mine) return 'bubble-not-found';
+    const scopes = scopesFor(mine);
+
+    // 1) aria-labels on the tick node (tooltips: Sent / Delivered / Read / Pending).
+    //    NOTE: current WhatsApp Web pads them with spaces (" Sent ") — trim first.
+    //    Ground truth (Oct-2026 DOM): single grey tick = aria " Sent ".
+    for (const scope of scopes) {
+      const ariaNodes = [...scope.querySelectorAll('[aria-label]')];
+      for (const n of ariaNodes) {
+        const label = (n.getAttribute('aria-label') || '').trim().toLowerCase();
+        if (!label || label === 'you:') continue;
+        if (/pending|not sent|waiting|clock/.test(label)) return 'clock';
+        if (/read/.test(label)) return 'read';
+        if (/deliver/.test(label)) return 'delivered';
+        if (label === 'sent') return 'sent';   // single tick: left our device, not yet on recipient's
+      }
+    }
+
+    // 2) data-icon on the tick node (wds-ic-* in current builds, msg-*/dblcheck in older).
+    //    Per Oct-2026 ground truth the single-tick icon is check-styled, so any
+    //    check/tick icon WITHOUT a dbl marker counts as single ('sent'); a real
+    //    device-delivery announces itself via aria "Delivered" handled above.
+    for (const scope of scopes) {
+      const icons = [...scope.querySelectorAll('[data-icon]')];
+      for (const el of icons) {
+        const icon = (el.getAttribute('data-icon') || '').toLowerCase();
+        if (!icon || icon.includes('tail')) continue;
+        if (icon.includes('time') || icon.includes('clock') || icon.includes('pending')) return 'clock';
+        if (icon.includes('dblcheck-ack') || icon.includes('read')) return 'read';
+        if (icon.includes('dblcheck')) return 'delivered';
+        if (icon.includes('sent') || icon.includes('check') || icon.includes('tick') || icon.includes('deliver')) return 'sent';
+      }
+    }
+
+    // 3) svg <title> inside msg-meta (current single-tick icon is titled
+    //    "wds-ic-delivered" = delivered-to-server, i.e. single grey tick).
+    for (const scope of scopes) {
+      const titles = [...scope.querySelectorAll('svg title')].map(t => (t.textContent || '').toLowerCase());
+      for (const t of titles) {
+        if (!t || t.includes('tail')) continue;
+        if (/pending|clock|time/.test(t)) return 'clock';
+        if (/read/.test(t)) return 'read';
+        if (/sent|tick|check|deliver/.test(t)) return 'sent';
+      }
+    }
+
     const html = mine.innerHTML || '';
     const text = mine.innerText || mine.textContent || '';
-
-    const ariaNodes = [...mine.querySelectorAll('[aria-label]')];
-    for (const n of ariaNodes) {
-      const label = (n.getAttribute('aria-label') || '').toLowerCase();
-      if (/pending|not sent|waiting/.test(label)) return 'clock';
-      if (/read/.test(label)) return 'read';
-      if (/delivered/.test(label)) return 'delivered';
-      if (/^sent$/.test(label)) return 'sent';
-    }
-
-    const iconEl = mine.querySelector('[data-icon]');
-    if (iconEl) {
-      const icon = (iconEl.getAttribute('data-icon') || '').toLowerCase();
-      if (icon.includes('time') || icon.includes('clock')) return 'clock';
-      if (icon.includes('dblcheck-ack')) return 'read';
-      if (icon.includes('dblcheck')) return 'delivered';
-      if (icon.includes('check') || icon.includes('tick')) return 'sent';
-    }
-
-    const titleEl = mine.querySelector('svg title');
-    if (titleEl) {
-      const t = (titleEl.textContent || '').toLowerCase();
-      if (/pending/.test(t)) return 'clock';
-      if (/read/.test(t)) return 'read';
-      if (/delivered/.test(t)) return 'delivered';
-      if (/sent|tick|check/.test(t)) return 'sent';
-    }
-
     if (/[\u2713\u2714\u2705]/.test(text) || /[\u2713\u2714\u2705]/.test(html)) return 'sent';
     return 'unknown';
   }
@@ -138,8 +167,17 @@ _WA_STATUS_PROBE_JS = r"""
     return s !== 'unknown' && s !== 'bubble-not-found' && s !== 'clock';
   };
   window.__waSnippet = function (snip) {
+    // Diagnostic snippet: the msg-meta footer (tick node) + tick labels,
+    // so a future 'unknown' carries the actual marker in the log.
     const mine = findRow(snip);
-    return mine ? (mine.outerHTML || '').slice(0, 1200) : '';
+    if (!mine) return '';
+    const scopes = scopesFor(mine);
+    const meta = scopes[0];
+    const bits = [];
+    bits.push('META:' + (meta.outerHTML || '').slice(0, 1500));
+    bits.push('TITLES:' + [...mine.querySelectorAll('svg title')].map(t => t.textContent).join('|').slice(0, 200));
+    bits.push('LABELS:' + [...mine.querySelectorAll('[aria-label]')].map(n => n.getAttribute('aria-label')).join('|').slice(0, 200));
+    return bits.join(' ');
   };
 })();
 """
@@ -175,6 +213,8 @@ def log_reminder_send(batch_id, reminder, send_type, message, status, error=None
 
 
 def stamp_reminder_sent(reminder_id, col):
+    if reminder_id is None:
+        return  # payment-accepted sends have no reminder row to stamp
     conn = get_db_connection(as_dict=True)
     cur = conn.cursor()
     cur.execute(f"""
@@ -194,9 +234,9 @@ def _pending_notifies(month=None):
         SELECT l.id AS log_id, l.reminder_id, l.tenant_id, l.phone_number,
                l.message, l.send_type
         FROM rental_core.reminder_send_log l
-        JOIN rental_core.tenant_reminders r ON l.reminder_id = r.id
+        LEFT JOIN rental_core.tenant_reminders r ON l.reminder_id = r.id
         WHERE l.send_type = 'NOTIFY' AND l.status = 'QUEUED'
-          AND r.status = 'ACTIVE'
+          AND (l.reminder_id IS NULL OR r.status = 'ACTIVE')
     """
     args = []
     if month:
@@ -392,9 +432,10 @@ def build_items(month=None, notify_only=False):
     seen = set()
     conn = get_db_connection(as_dict=True)
     cur = conn.cursor()
-    # 1) pending NOTIFY (QUEUED)
+    # 1) pending NOTIFY (QUEUED). Payment-accepted rows share
+    # reminder_id NULL, so key them by log row to avoid collapsing.
     for n in _pending_notifies(month):
-        key = (n["reminder_id"], "NOTIFY")
+        key = (n["reminder_id"], "NOTIFY") if n["reminder_id"] is not None else ("pay", n["log_id"], "NOTIFY")
         if key in seen:
             continue
         seen.add(key)
@@ -540,7 +581,10 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
             random_pause(min_delay, max_delay)
 
         num = wm.normalize_phone(test_number) if test_number else wm.normalize_phone(it["phone_number"])
-        _akey = (it["reminder_id"], it["send_type"])
+        # Payment-accepted NOTIFYs share reminder_id NULL — key those by log row
+        # so distinct messages are not collapsed into one attempt per run.
+        _akey = ((it["reminder_id"], it["send_type"]) if it.get("reminder_id") is not None
+                 else ("pay", it.get("log_id"), it["send_type"]))
         if _akey in _attempted:
             print(f"⏭  SKIP {it['label']} tenant {it['tenant_id']}: already attempted this run")
             skipped += 1
@@ -556,19 +600,21 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
                 skipped += 1
                 continue
 
-        # Verify reminder still ACTIVE (not superseded/deleted)
-        try:
-            conn_chk = get_db_connection(as_dict=True); _c = conn_chk.cursor()
-            _c.execute("SELECT status FROM rental_core.tenant_reminders WHERE id=%s", (it["reminder_id"],))
-            _row = _c.fetchone()
-            _c.close(); conn_chk.close()
-            if not _row or _row["status"] != "ACTIVE":
-                # NOTIFY-RETRY synthetic items may have lost their reminder; skip
-                print(f"⏭  SKIP {it['label']} tenant {it['tenant_id']}: reminder no longer ACTIVE")
-                skipped += 1
-                continue
-        except Exception:
-            pass
+        # Verify reminder still ACTIVE (not superseded/deleted).
+        # Payment-accepted NOTIFYs have reminder_id NULL (no reminder row) — skip check.
+        if it.get("reminder_id") is not None:
+            try:
+                conn_chk = get_db_connection(as_dict=True); _c = conn_chk.cursor()
+                _c.execute("SELECT status FROM rental_core.tenant_reminders WHERE id=%s", (it["reminder_id"],))
+                _row = _c.fetchone()
+                _c.close(); conn_chk.close()
+                if not _row or _row["status"] != "ACTIVE":
+                    # NOTIFY-RETRY synthetic items may have lost their reminder; skip
+                    print(f"⏭  SKIP {it['label']} tenant {it['tenant_id']}: reminder no longer ACTIVE")
+                    skipped += 1
+                    continue
+            except Exception:
+                pass
 
         # ---- per-item send with full isolation ----
         # We attempt at most 2 tries *within this run* if first returns clock,
@@ -717,18 +763,24 @@ def send_items(items, min_delay=60, max_delay=180, dry_run=False, limit=None,
                 "phone_number": it["phone_number"], "billing_month": it["billing_month"],
             }
             if item_sent:
+                # Single grey tick ('sent') = message left OUR device but is not yet
+                # on the recipient's — still a success, recorded with a warning
+                # instead of an error. Double tick / read ('delivered'/'read')
+                # are plain SENT, exactly as before.
+                warn = _SEND_WARNING if last_diag == 'sent' else None
                 if it.get("log_id"):
-                    _mark_log_sent(it["log_id"], last_screenshot)
+                    _mark_log_sent(it["log_id"], last_screenshot, warning=warn)
                 elif it.get("is_retry"):
                     # retry NOTIFY was not a QUEUED log — insert SENT directly
                     log_reminder_send(_BATCH, reminder, it["send_type"], it["message"], "SENT",
-                                      screenshot_b64=last_screenshot)
+                                      error=warn, screenshot_b64=last_screenshot)
                 else:
                     log_reminder_send(_BATCH, reminder, it["send_type"], it["message"], "SENT",
-                                      screenshot_b64=last_screenshot)
+                                      error=warn, screenshot_b64=last_screenshot)
                 stamp_reminder_sent(it["reminder_id"], it.get("stamp_col", "notify_sent_at"))
                 sent += 1
-                print(f"   ✅ Sent {it['label']} to tenant {it['tenant_id']} (status: {last_diag})")
+                print(f"   ✅ Sent {it['label']} to tenant {it['tenant_id']} (status: {last_diag})"
+                      + (" — delivered-to-recipient unconfirmed" if warn else ""))
             else:
                 # FAILED — only stamp if this was the final allowed attempt
                 # (prevents retry starvation)
@@ -791,21 +843,25 @@ def _mark_log_failed(log_id, error, screenshot_b64=None):
     conn.close()
 
 
-def _mark_log_sent(log_id, screenshot_b64=None):
+def _mark_log_sent(log_id, screenshot_b64=None, warning=None):
+    """QUEUED → SENT. `warning` (e.g. single-tick unconfirmed delivery) is
+    stored in the error column as a non-error note; None clears nothing —
+    it writes the warning only when given, else leaves error untouched."""
     conn = get_db_connection(as_dict=True)
     cur = conn.cursor()
+    sets, args = ["status = 'SENT'", "sent_at = now()"], []
     if screenshot_b64:
-        cur.execute("""
-            UPDATE rental_core.reminder_send_log
-               SET status = 'SENT', sent_at = now(), screenshot = %s
-             WHERE id = %s AND status = 'QUEUED'
-        """, (screenshot_b64, log_id))
-    else:
-        cur.execute("""
-            UPDATE rental_core.reminder_send_log
-               SET status = 'SENT', sent_at = now()
-             WHERE id = %s AND status = 'QUEUED'
-        """, (log_id,))
+        sets.append("screenshot = %s")
+        args.append(screenshot_b64)
+    if warning:
+        sets.append("error = %s")
+        args.append(warning)
+    args.append(log_id)
+    cur.execute(f"""
+        UPDATE rental_core.reminder_send_log
+           SET {", ".join(sets)}
+         WHERE id = %s AND status = 'QUEUED'
+    """, args)
     conn.commit()
     cur.close()
     conn.close()

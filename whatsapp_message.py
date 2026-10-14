@@ -52,27 +52,34 @@ def _prev_month(ym):
         return ym
 
 
-def normalize_phone(phone):
-    """Normalize to international format without '+' for wa.me (e.g. 918223921823)."""
+def normalize_phone(phone, cc="91"):
+    """Normalize to international format without '+' for wa.me.
+
+    cc is the tenant's country dial code ('91' India, '977' Nepal).
+    Stored numbers are local digits; a pasted code is stripped first.
+    Legacy 10-digit numbers default to India exactly as before.
+    """
+    cc = str(cc or "91").strip().lstrip("+")
     digits = re.sub(r"\D", "", phone or "")
-    if digits.startswith("0"):
+    while digits.startswith("0") and len(digits) > 10:
         digits = digits[1:]
-    if len(digits) == 10:
+    if digits.startswith(cc) and len(digits) > 10:
+        return digits
+    # Legacy 10-digit Indian numbers keep working even if cc lookup missed.
+    if len(digits) == 10 and cc == "91":
         return "91" + digits
-    if len(digits) == 11 and digits.startswith("91"):
-        return digits
-    if len(digits) == 12 and digits.startswith("91"):
-        return digits
+    if len(digits) == 10:
+        return cc + digits
     return digits
 
 
-def wa_link(phone, message):
-    return f"https://wa.me/{normalize_phone(phone)}?text={quote(message or '')}"
+def wa_link(phone, message, cc="91"):
+    return f"https://wa.me/{normalize_phone(phone, cc)}?text={quote(message or '')}"
 
 
 def _tenant_address(cur, tenant_id):
     cur.execute("""
-        SELECT t.tenant_name, t.phone_number, r.display_address
+        SELECT t.tenant_name, t.phone_number, t.country_code, r.display_address
         FROM rental_core.tenants t
         LEFT JOIN rental_core.rooms r ON t.room_id = r.id
         WHERE t.id = %s
@@ -83,15 +90,21 @@ def _tenant_address(cur, tenant_id):
     return {
         "tenant_name": row['tenant_name'],
         "phone_number": row['phone_number'],
+        "country_code": row.get('country_code') or '91',
         "display_address": row['display_address'],
     }
 
 
 def _ledger(cur, tenant_id, billing_month):
+    # Effective bills: manual overrides win (same rule as generated totals),
+    # so WhatsApp hisab lines match the ledger's final values.
     cur.execute("""
-        SELECT prev_baki, prev_jama, bhadu_applied, light_bill, gas_bill,
-               maintenance_applied, common_misc_expenses, month_total,
-               gross_baki, jama, jama_date, new_baki
+        SELECT prev_baki, prev_jama, bhadu_applied,
+               COALESCE(light_bill_manual, light_bill) AS light_bill,
+               COALESCE(gas_bill_manual, gas_bill) AS gas_bill,
+               COALESCE(maintenance_manual, maintenance_applied) AS maintenance_applied,
+               COALESCE(common_misc_manual, common_misc_expenses) AS common_misc_expenses,
+               month_total, gross_baki, jama, jama_date, new_baki
         FROM rental_core.monthly_ledgers
         WHERE tenant_id = %s AND billing_month = %s
     """, (tenant_id, billing_month))
@@ -183,7 +196,7 @@ def message_payload(cur, tenant_id, billing_month, template=None):
         "tenant_id": tenant_id,
         "phone_number": tenant['phone_number'],
         "message": message,
-        "wa_link": wa_link(tenant['phone_number'], message),
+        "wa_link": wa_link(tenant['phone_number'], message, tenant.get('country_code') or '91'),
         "template_id": template['id'],
         "template_name": template['template_name'],
     }
